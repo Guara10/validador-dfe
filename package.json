@@ -1,0 +1,27 @@
+{
+  "name": "validador-dfe",
+  "version": "0.1.0",
+  "description": "Validador de XML e TX2 de NF-e no navegador: schema oficial, contas e coerência, com o erro explicado e a correção sugerida.",
+  "scripts": {
+    "schemas": "node scripts/build-schemas.mjs",
+    "dev": "vite",
+    "build": "node scripts/build-schemas.mjs && tsc -p . && vite build",
+    "build:artifact": "npm run build && node scripts/artifact.mjs",
+    "test": "vitest run",
+    "check": "vite-node test/run-file.ts"
+  },
+  "author": "Guilherme Lopes",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "@xmldom/xmldom": "^0.9.12",
+    "typescript": "^7.0.2",
+    "vite": "^6.4.5",
+    "vite-node": "^6.0.0",
+    "vite-plugin-singlefile": "^2.3.4",
+    "vitest": "^5.0.5",
+    "xmllint-wasm": "^5.3.0"
+  },
+  "private": true,
+  "type": "module"
+}

@@ -250,7 +250,7 @@ export function badCharInfo(v: string): string | null {
   const c = chars[i];
   const code = 'U+' + c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0');
   const NAMES: Record<string, string> = {
-    '\uFFFD': 'caractere corrompido (�), normalmente acento ou símbolo que se perdeu numa conversão de texto',
+    [String.fromCharCode(0xfffd)]: 'caractere corrompido, normalmente acento ou símbolo que se perdeu numa conversão de texto',
     '\u2013': 'travessão (–)', '\u2014': 'travessão longo (—)',
     '\u201C': 'aspas tipográficas (“)', '\u201D': 'aspas tipográficas (”)',
     '\u2018': 'apóstrofo tipográfico (‘)', '\u2019': 'apóstrofo tipográfico (’)',

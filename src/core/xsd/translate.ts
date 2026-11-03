@@ -1,5 +1,5 @@
 import type { Finding, XNode } from '../types';
-import { Dict, describeFormat, suggestValue, valueOk, type DNode, minOf, maxOf } from '../dict';
+import { Dict, describeFormat, suggestValue, valueOk, badCharInfo, type DNode, minOf, maxOf } from '../dict';
 import { dictPath, humanPath } from '../xml/parse';
 
 export interface RawXsdError {
@@ -257,6 +257,8 @@ function facetFinding(ctx: TranslateCtx, node: XNode | undefined, el: string, at
 
 /** Diagnóstico específico de alguns padrões comuns. */
 function explainPattern(v: string, dn?: DNode): string {
+  const bad = badCharInfo(v);
+  if (bad) return bad + ' Geralmente vem do cadastro (texto colado de outro programa); corrija lá para não voltar na próxima nota.';
   if (/^\s|\s$/.test(v)) return 'O valor tem espaço no início ou no fim, e o leiaute não aceita.';
   if (/[\r\n\t]/.test(v)) return 'O valor tem quebra de linha ou tabulação, e o leiaute não aceita.';
   if (dn?.f?.p?.some((p) => p.includes('[1-9]')) && v.includes(',')) return 'Número com vírgula: o XML usa ponto como separador decimal.';

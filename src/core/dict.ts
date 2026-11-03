@@ -226,6 +226,11 @@ export function suggestValue(v: string, f: Facets | undefined): { value: string;
     const digits = v.replace(/\D/g, '');
     if (digits !== v) tries.push({ value: digits, how: 'removi pontos, traços, barras e espaços' });
   }
+  // texto: caracteres fora do Latin-1 (corrompidos, travessão, aspas tipográficas...)
+  if (/[^\u0020-\u00FF]/.test(v)) {
+    const t = v.replace(/[\u2013\u2014]/g, '-').replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"').replace(/[^\u0020-\u00FF]/g, ' ').replace(/ {2,}/g, ' ').trim();
+    tries.push({ value: t, how: 'removi caracteres que o leiaute não aceita' });
+  }
   // texto: espaços nas pontas, quebras de linha, espaços duplos
   {
     let t = v.replace(/[\r\n\t]+/g, ' ').replace(/ {2,}/g, ' ').trim();
@@ -235,4 +240,23 @@ export function suggestValue(v: string, f: Facets | undefined): { value: string;
   }
   for (const t of tries) if (t.value !== v && valueOk(t.value, f)) return t;
   return null;
+}
+
+/** Descreve o primeiro caractere fora do que o leiaute aceita (Latin-1 imprimível). */
+export function badCharInfo(v: string): string | null {
+  const chars = [...v];
+  const i = chars.findIndex((c) => !/[\u0020-\u00FF]/.test(c));
+  if (i < 0) return null;
+  const c = chars[i];
+  const code = 'U+' + c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0');
+  const NAMES: Record<string, string> = {
+    '\uFFFD': 'caractere corrompido (�), normalmente acento ou símbolo que se perdeu numa conversão de texto',
+    '\u2013': 'travessão (–)', '\u2014': 'travessão longo (—)',
+    '\u201C': 'aspas tipográficas (“)', '\u201D': 'aspas tipográficas (”)',
+    '\u2018': 'apóstrofo tipográfico (‘)', '\u2019': 'apóstrofo tipográfico (’)',
+    '\u2022': 'marcador (•)', '\u20AC': 'símbolo do euro (€)', '\t': 'tabulação', '\u00A0': 'espaço especial',
+  };
+  const name = NAMES[c] ?? (c.codePointAt(0)! < 32 ? 'caractere de controle invisível' : `caractere especial "${c}"`);
+  const before = chars.slice(Math.max(0, i - 12), i).join('');
+  return `Tem um ${name} (${code}) na posição ${i + 1}, logo depois de "${before}". O leiaute só aceita letras, números, acentos comuns e símbolos básicos.`;
 }

@@ -89,6 +89,18 @@ describe('TX2 com numeração antiga', () => {
   });
 });
 
+describe('caracteres inválidos', () => {
+  it('caractere corrompido no nome do emitente', async () => {
+    const t = ex('nfe-valida.tx2').replace('xNome_C03=CEREAIS EXEMPLO LTDA', 'xNome_C03=CEREAIS EXEMPLO\uFFFD LTDA');
+    const f = (await analyze(t, eng))[0].findings.find((x) => x.tx2Field === 'xNome_C03');
+    expect(f?.message).toContain('U+FFFD');
+    expect(f?.fix?.value).toBe('CEREAIS EXEMPLO LTDA');
+  });
+  it('travessão vira hífen', () => {
+    expect(suggestValue('ADUBO – FOLIAR', nfeDict.get('NFe/infNFe/det/prod/xProd')!.f)?.value).toBe('ADUBO - FOLIAR');
+  });
+});
+
 describe('XML', () => {
   it('mostra todos os erros de schema de uma vez', async () => {
     const a = await run('erro-schema-variados.xml');

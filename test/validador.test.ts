@@ -6,7 +6,8 @@ import { nfeDict, nfeSchemas } from '../src/core/engine-data';
 import { nodeRunner } from './node-runner';
 import { suggestValue, describeFormat } from '../src/core/dict';
 
-const eng = { dict: nfeDict, runner: nodeRunner, schemas: nfeSchemas };
+// relógio fixo: os exemplos são de 27/10/2026
+const eng = { dict: nfeDict, runner: nodeRunner, schemas: nfeSchemas, now: () => new Date('2026-10-27T12:00:00-03:00') };
 const ex = (f: string) => readFileSync(join(__dirname, '..', 'exemplos', f), 'utf8');
 const run = async (f: string) => (await analyze(ex(f), eng))[0];
 const titles = (a: Awaited<ReturnType<typeof run>>) => a.findings.filter((f) => f.sev !== 'info').map((f) => `${f.code ?? '-'} ${f.title}`);
@@ -58,6 +59,33 @@ describe('TX2', () => {
     expect(fix('xProd_I04')).toBe('MILHO EM GRAOS');
     // valor inválido no item não pode gerar diferença falsa no total
     expect(a.findings.some((f) => f.code === '564')).toBe(false);
+  });
+});
+
+describe('datas', () => {
+  it('228: emissão com mais de 30 dias de atraso', async () => {
+    const a = (await analyze(ex('nfe-valida.tx2'), { ...eng, now: () => new Date('2026-12-15T09:00:00-03:00') }))[0];
+    const f = a.findings.find((x) => x.code === '228');
+    expect(f?.tx2Field).toBe('dhEmi_B09');
+  });
+  it('506: saída anterior à emissão', async () => {
+    const t = ex('nfe-valida.tx2').replace('dhSaiEnt_B10=2026-10-27T10:15:00-03:00', 'dhSaiEnt_B10=2026-10-02T10:15:00-03:00');
+    const a = (await analyze(t, eng))[0];
+    expect(a.findings.find((x) => x.code === '506')?.fix?.value).toBe('2026-10-27T10:15:00-03:00');
+  });
+  it('703: emissão no futuro', async () => {
+    const a = (await analyze(ex('nfe-valida.tx2'), { ...eng, now: () => new Date('2026-10-26T12:00:00-03:00') }))[0];
+    expect(a.findings.some((x) => x.code === '703' && x.title === 'Data de emissão no futuro')).toBe(true);
+  });
+});
+
+describe('TX2 com numeração antiga', () => {
+  it('CNPJ_G51 vai para autXML, não para entrega', async () => {
+    const t = ex('nfe-valida.tx2').replace('*******TOTAIS', 'CNPJ_G51_1=33557799000170\n*******TOTAIS');
+    const a = (await analyze(t, eng))[0];
+    expect(a.schemaOk).toBe(true);
+    expect(a.generatedXml).toContain('<autXML>');
+    expect(a.generatedXml).not.toContain('<entrega>');
   });
 });
 

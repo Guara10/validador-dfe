@@ -12,7 +12,19 @@ import { attr, child, childrenNamed, select, humanPath } from '../xml/parse';
 export interface RuleCtx {
   lineOf: (n: XNode | undefined) => number | undefined;
   fieldOf: (n: XNode | undefined) => string | undefined;
+  /** momento da validação (injetável nos testes) */
+  now?: Date;
+  /** nota já autorizada (nfeProc com protocolo): regras de prazo de envio não se aplicam */
+  autorizada?: boolean;
 }
+
+/** data/hora com fuso -> Date; undefined se fora do formato */
+function parseDh(s?: string): Date | undefined {
+  if (!s || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}([+-]\d{2}:\d{2})$/.test(s)) return undefined;
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? undefined : d;
+}
+const fmtData = (d: Date) => d.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
 
 const num = (n: XNode | undefined): number | undefined => {
   if (!n || n.text === undefined || n.text.trim() === '') return undefined;
@@ -141,6 +153,40 @@ export function runNfeRules(nfe: XNode, ctx: RuleCtx): Finding[] {
         sev: 'erro', origin: 'regra', title: 'cDV diferente do dígito da chave',
         message: `ide/cDV deve ser igual ao último dígito da chave de acesso (${calc[43]}).`,
         ...at(cDV), found: cDV.text, expected: calc[43], fix: { text: 'Use o DV calculado.', value: calc[43] },
+      });
+    }
+  }
+
+  /* ---------- prazos de emissão e saída ---------- */
+  const dhEmiN = child(ide, 'dhEmi'), dhSaiN = child(ide, 'dhSaiEnt');
+  const dEmi = parseDh(dhEmiN?.text), dSai = parseDh(dhSaiN?.text);
+  if (dEmi && dSai && dSai.getTime() < dEmi.getTime() && child(ide, 'mod')?.text !== '65') {
+    out.push({
+      sev: 'erro', origin: 'regra', code: '506',
+      title: 'Data de saída/entrada anterior à emissão',
+      message: `dhSaiEnt (${dhSaiN!.text}) é anterior a dhEmi (${dhEmiN!.text}). A data de saída/entrada precisa ser igual ou posterior à emissão, então não serve para "voltar" a data de uma operação antiga.`,
+      ...at(dhSaiN), found: dhSaiN!.text, expected: `igual ou posterior a ${dhEmiN!.text}`,
+      fix: { text: 'Use a mesma data/hora da emissão (ou posterior), ou não informe dhSaiEnt (campo opcional na NF-e).', value: dhEmiN!.text },
+    });
+  }
+  if (dEmi && !ctx.autorizada) {
+    const now = ctx.now ?? new Date();
+    const dias = (now.getTime() - dEmi.getTime()) / 86400000;
+    if (dias > 30) {
+      out.push({
+        sev: 'erro', origin: 'regra', code: '228',
+        title: 'Data de emissão muito atrasada',
+        message: `dhEmi é de ${fmtData(dEmi)}, ${Math.floor(dias)} dias antes de hoje (${fmtData(now)}). A SEFAZ rejeita emissão com mais de 30 dias de atraso (o limite pode ser menor em algumas UFs). Para operação antiga, a nota sai com a data de hoje e a data real da operação vai nas informações complementares, conforme orientação do contador.`,
+        ...at(dhEmiN), found: dhEmiN!.text,
+        fix: { text: 'Corrija dhEmi (e dhSaiEnt) para a data/hora do envio. Mudar o mês da emissão muda a chave de acesso (AAMM) e o cDV: gere a nota de novo pelo sistema ou recalcule a chave.' },
+      });
+    } else if (dias < -5 / 1440) {
+      out.push({
+        sev: 'aviso', origin: 'regra', code: '703',
+        title: 'Data de emissão no futuro',
+        message: `dhEmi (${dhEmiN!.text}) é posterior ao horário atual. Se for transmitida agora, a SEFAZ rejeita por emissão posterior ao recebimento.`,
+        ...at(dhEmiN), found: dhEmiN!.text,
+        fix: { text: 'Use a data/hora real do envio. Confira também o fuso horário.' },
       });
     }
   }

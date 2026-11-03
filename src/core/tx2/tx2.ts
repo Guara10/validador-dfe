@@ -134,7 +134,8 @@ export function buildFromTx2(note: Tx2Note, dict: Dict): BuildResult {
 
   const candidates = (f: Tx2Field): DNode[] => {
     const isItem = ITEM_LETTERS.test(f.letters);
-    const g = GROUP[f.letters];
+    // autXML aparece com a numeração antiga do leiaute (G50-G52) em alguns geradores de TX2
+    const g = f.letters === 'G' && f.idNum >= 50 ? 'autXML' : GROUP[f.letters];
     const pool = (f.tag === 'Id' || f.tag === 'versao' || f.tag === 'nItem') ? dict.byName.get('@' + f.tag) ?? [] : dict.byName.get(f.tag) ?? [];
     let c = pool.filter((n) => n.path.startsWith(infPath + '/') || n.path.startsWith(infPath + '/@'));
     if (g !== undefined) {

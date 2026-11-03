@@ -250,13 +250,12 @@ export function badCharInfo(v: string): string | null {
   const c = chars[i];
   const code = 'U+' + c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0');
   const NAMES: Record<string, string> = {
-    [String.fromCharCode(0xfffd)]: 'caractere corrompido, normalmente acento ou símbolo que se perdeu numa conversão de texto',
     '\u2013': 'travessão (–)', '\u2014': 'travessão longo (—)',
     '\u201C': 'aspas tipográficas (“)', '\u201D': 'aspas tipográficas (”)',
     '\u2018': 'apóstrofo tipográfico (‘)', '\u2019': 'apóstrofo tipográfico (’)',
     '\u2022': 'marcador (•)', '\u20AC': 'símbolo do euro (€)', '\t': 'tabulação', '\u00A0': 'espaço especial',
   };
-  const name = NAMES[c] ?? (c.codePointAt(0)! < 32 ? 'caractere de controle invisível' : `caractere especial "${c}"`);
+  const name = c.codePointAt(0) === 0xfffd ? 'caractere corrompido, normalmente acento ou símbolo que se perdeu numa conversão de texto' : NAMES[c] ?? (c.codePointAt(0)! < 32 ? 'caractere de controle invisível' : `caractere especial "${c}"`);
   const before = chars.slice(Math.max(0, i - 12), i).join('');
   return `Tem um ${name} (${code}) na posição ${i + 1}, logo depois de "${before}". O leiaute só aceita letras, números, acentos comuns e símbolos básicos.`;
 }

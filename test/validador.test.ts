@@ -96,6 +96,12 @@ describe('caracteres inválidos', () => {
     expect(f?.message).toContain('U+FFFD');
     expect(f?.fix?.value).toBe('CEREAIS EXEMPLO LTDA');
   });
+  it('exemplo do menu: caractere inválido no nome do emitente', async () => {
+    const a = await run('erro-225-caractere-invalido.tx2');
+    const f = a.findings.find((x) => x.tx2Field === 'xNome_C03');
+    expect(f?.code).toBe('225');
+    expect(f?.fix?.value).toBe('CEREAIS EXEMPLO COMERCIO- E REPRESENTACOES LTDA');
+  });
   it('travessão vira hífen', () => {
     expect(suggestValue('ADUBO – FOLIAR', nfeDict.get('NFe/infNFe/det/prod/xProd')!.f)?.value).toBe('ADUBO - FOLIAR');
   });

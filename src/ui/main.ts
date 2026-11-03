@@ -10,6 +10,7 @@ import { createBrowserRunner } from '../browser/xsd-runner';
 const rawExamples = import.meta.glob('../../exemplos/*.{xml,tx2}', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
 const EXAMPLE_LABELS: [string, string][] = [
   ['erro-225-cenq-vazio.tx2', 'TX2 · 225 com cEnq vazio'],
+  ['erro-225-caractere-invalido.tx2', 'TX2 · 225 caractere inválido no nome'],
   ['erro-1080-item-sem-ibscbs.tx2', 'TX2 · 1080 item sem IBS/CBS'],
   ['erro-929-cst51-sem-predbc.tx2', 'TX2 · 929 CST 51 sem pRedBC'],
   ['erro-calculos.tx2', 'TX2 · totais e cálculos'],

@@ -432,13 +432,13 @@ export function tx2GhostFrom(g: Ghost, b: BuildResult, dict: Dict): Ghost | unde
   const value = /^<(\w+)>(.*)<\/\1>$/.exec(g.text)?.[2] ?? '…';
   // campo existe vazio no TX2: é para preencher a própria linha
   const empty = makeEmptyLookup(b)(parent, name);
-  if (empty) return { afterLine: empty.line, depth: 0, text: `${empty.field}=${value}`, fill: true, format: 'tx2', name };
+  if (empty) return { afterLine: empty.line, depth: 0, text: `${empty.field}=${value}`, fill: true, format: 'tx2', name, note: g.note };
   const leaves = dn.c?.length ? requiredLeaves(dict, dn) : [dn];
-  const text = leaves.map((l) => `${l.n}_${idFor(l.path, b.idsByPath) ?? '?'}=${l === dn ? value : '…'}`).join('\n');
+  const text = leaves.map((l) => `${l.n}_${idFor(l.path, b.idsByPath) ?? '?'}=${l === dn ? value : g.values?.[l.n] ?? '…'}`).join('\n');
   const order = (n: XNode) => dict.get(dictPath(n))?.o ?? -1;
   const prev = [...parent.children].reverse().find((c) => order(c) < dn.o);
   const next = parent.children.find((c) => order(c) > dn.o);
   const afterLine = (prev && maxLine(prev)) ?? (next?.tx2Line !== undefined ? next.tx2Line - 1 : maxLine(parent));
   if (afterLine === undefined) return undefined;
-  return { afterLine, depth: 0, text, group: g.group, format: 'tx2', name };
+  return { afterLine, depth: 0, text, group: g.group, format: 'tx2', name, note: g.note };
 }

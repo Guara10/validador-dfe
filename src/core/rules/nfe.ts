@@ -105,14 +105,43 @@ export function runNfeRules(nfe: XNode, ctx: RuleCtx): Finding[] {
   const tot = select(inf, 'total/ICMSTot');
 
   const at = (n: XNode | undefined) => ({ path: n ? humanPath(n) : undefined, line: ctx.lineOf(n), tx2Field: ctx.fieldOf(n) });
-  const ghosts = (parent: XNode | undefined, items: [string, string?][]) => {
+  const ghosts = (parent: XNode | undefined, items: [string, string?, { note?: string; values?: Record<string, string> }?][]) => {
     if (!ctx.dict) return undefined;
-    const gs = items.map(([n, t]) => ghostFor(ctx.dict!, parent, n, t)).filter((g): g is NonNullable<typeof g> => !!g);
+    const gs = items.map(([n, t, extra]) => { const g = ghostFor(ctx.dict!, parent, n, t); return g && extra ? { ...g, ...extra } : g; }).filter((g): g is NonNullable<typeof g> => !!g);
     return gs.length ? gs : undefined;
+  };
+  /** valor do item para base de cálculo: vProd − vDesc + vFrete + vSeg + vOutro */
+  const itemValue = (det: XNode) => {
+    const pr = child(det, 'prod');
+    const v = (t: string) => num(child(pr, t)) ?? 0;
+    return num(child(pr, 'vProd')) === undefined ? undefined : v('vProd') - v('vDesc') + v('vFrete') + v('vSeg') + v('vOutro');
   };
   const itemLabel = (det: XNode) => `item ${attr(det, 'nItem') ?? dets.indexOf(det) + 1}`;
 
   /** confere valor x esperado; tol em reais */
+  /** valores de item que estão com a conta errada -> valor que fecha a conta */
+  const corrections = new Map<XNode, number>();
+  const findingOf = (n: XNode) => out.find((f) => f.origin === 'calculo' && f.line === ctx.lineOf(n) && f.found === n.text);
+  /**
+   * Total que não bate com a soma dos itens. Se a diferença some quando os itens com conta errada
+   * são corrigidos, o erro está no item: não sugere mexer no total e avisa no card do item.
+   */
+  const checkTotal = (o: { node: XNode | undefined; parts: (XNode | undefined)[]; code?: string; title: string; how: string }) => {
+    if (!o.node || o.parts.some(bad)) return;
+    const v = num(o.node);
+    if (v === undefined) return;
+    const raw = o.parts.reduce((acc, n) => acc + cents(num(n) ?? 0), 0) / 100;
+    const fixed = o.parts.reduce((acc, n) => acc + cents(n && corrections.has(n) ? corrections.get(n)! : num(n) ?? 0), 0) / 100;
+    if (Math.abs(r2(v - raw)) < 0.005) return;
+    if (Math.abs(r2(v - fixed)) < 0.005) {
+      for (const n of o.parts) if (n && corrections.has(n)) {
+        const f = findingOf(n);
+        if (f && !f.message.includes(o.node.name + ' ')) f.message += ` O total ${o.node.name} da nota já está com o valor certo: corrigindo este campo, a soma dos itens passa a fechar com ele.`;
+      }
+      return;
+    }
+    check({ node: o.node, expected: raw, code: o.code, sev: 'erro', title: o.title, how: o.how });
+  };
   const check = (o: {
     node: XNode | undefined; expected: number; tol?: number; sev?: Finding['sev']; code?: string;
     title: string; how: string; extra?: string; parentForMissing?: XNode;
@@ -121,6 +150,7 @@ export function runNfeRules(nfe: XNode, ctx: RuleCtx): Finding[] {
     if (v === undefined || isNaN(o.expected)) return;
     const diff = r2(v - o.expected);
     if (Math.abs(diff) <= (o.tol ?? 0) + 1e-9) return;
+    corrections.set(o.node!, r2(o.expected));
     out.push({
       sev: o.sev ?? 'erro', origin: 'calculo', code: o.code,
       title: o.title,
@@ -271,6 +301,32 @@ export function runNfeRules(nfe: XNode, ctx: RuleCtx): Finding[] {
 
   /* ---------- itens ---------- */
   const anyIBS = dets.some((d) => select(d, 'imposto/IBSCBS'));
+  /** base do IBS/CBS de um item sem o grupo, pela fórmula que os outros itens desta nota seguem */
+  const ibsBaseFor = (det: XNode): { values?: Record<string, string>; note: string } => {
+    const fiscal = 'CST, cClassTrib e alíquotas dependem do cadastro de tributação do produto e não são preenchidos.';
+    const parts = (d: XNode) => {
+      const vi = itemValue(d);
+      if (vi === undefined) return undefined;
+      const icms = num(child(icmsGroup(d), 'vICMS')) ?? 0;
+      const pis = num(child(select(d, 'imposto/PIS')?.children[0], 'vPIS')) ?? 0;
+      const cof = num(child(select(d, 'imposto/COFINS')?.children[0], 'vCOFINS')) ?? 0;
+      return { vi, icms, pis, cof };
+    };
+    const formulas: [string, (x: NonNullable<ReturnType<typeof parts>>) => number][] = [
+      ['valor do item', (x) => x.vi],
+      ['valor do item − vICMS', (x) => x.vi - x.icms],
+      ['valor do item − vICMS − vPIS − vCOFINS', (x) => x.vi - x.icms - x.pis - x.cof],
+    ];
+    const refs = dets.filter((d) => d !== det && num(select(d, 'imposto/IBSCBS/gIBSCBS/vBC')) !== undefined);
+    const me = parts(det);
+    if (!refs.length || !me) return { note: fiscal };
+    const ok = formulas.filter(([, fn]) => refs.every((d) => { const x = parts(d); return x && Math.abs(fn(x) - num(select(d, 'imposto/IBSCBS/gIBSCBS/vBC'))!) <= 0.01; }));
+    const results = [...new Set(ok.map(([, fn]) => fmt2(r2(fn(me)))))];
+    if (ok.length && results.length === 1) {
+      return { values: { vBC: results[0] }, note: `vBC = ${ok[0][0]} = ${results[0]}, a mesma regra que os outros itens desta nota seguem. ${fiscal}` };
+    }
+    return { note: (ok.length ? 'A base (vBC) não sai de conta com segurança: mais de uma regra serve para os outros itens e elas dão valores diferentes neste. ' : '') + fiscal };
+  };
   for (const det of dets) {
     const lbl = itemLabel(det);
     const prod = child(det, 'prod');
@@ -310,7 +366,21 @@ export function runNfeRules(nfe: XNode, ctx: RuleCtx): Finding[] {
             title: `CST 51 sem ${faltam.join(' e ')} (${lbl})`,
             message: `O grupo ICMS51 do ${lbl} está sem ${faltam.join(' e ')}. Algumas UFs (o PR, pela regra N07-10 do MOC) exigem esses campos sempre que o CST é 51, mesmo com valor zero, e rejeitam com 929 "CST de diferimento sem as informações de diferimento". O campo entra logo depois da linha marcada.`,
             ...at(anchor), found: '(ausente)',
-            ghosts: ghosts(g, faltam.map((t) => [t, t === 'pRedBC' ? '<pRedBC>0.00</pRedBC>' : '<pDif>…</pDif>'] as [string, string])),
+            ghosts: ghosts(g, faltam.map((t) => {
+              if (t === 'pRedBC') {
+                const base = itemValue(det);
+                if (vBC !== undefined && base) {
+                  const red = (1 - vBC / base) * 100;
+                  if (Math.abs(red) < 0.005) return [t, '<pRedBC>0.00</pRedBC>', { note: `pRedBC = 0.00: a vBC (${fmt2(vBC)}) é igual ao valor do item, então não há redução de base.` }];
+                  if (red > 0 && red < 100) return [t, `<pRedBC>${red.toFixed(4)}</pRedBC>`, { note: `pRedBC = (1 − vBC ÷ valor do item) × 100 = (1 − ${fmt2(vBC)} ÷ ${fmt2(base)}) × 100. Confira com o percentual de redução do cadastro.` }];
+                }
+                return [t, '<pRedBC>0.00</pRedBC>', { note: 'pRedBC = 0.00: o grupo não tem vBC, então foi considerado sem redução de base. Confirme no cadastro de tributação.' }];
+              }
+              const vOp = num(child(g, 'vICMSOp')), vDif = num(child(g, 'vICMSDif')), vI = num(child(g, 'vICMS'));
+              if (vOp && vDif !== undefined) return [t, `<pDif>${((vDif / vOp) * 100).toFixed(4)}</pDif>`, { note: `pDif = vICMSDif ÷ vICMSOp × 100 = ${fmt2(vDif)} ÷ ${fmt2(vOp)} × 100.` }];
+              if (vOp && vI !== undefined) return [t, `<pDif>${(((vOp - vI) / vOp) * 100).toFixed(4)}</pDif>`, { note: `pDif = (vICMSOp − vICMS) ÷ vICMSOp × 100 = (${fmt2(vOp)} − ${fmt2(vI)}) ÷ ${fmt2(vOp)} × 100.` }];
+              return [t, '<pDif>…</pDif>', { note: 'pDif não sai de conta: o grupo não tem vICMSOp nem vICMSDif. Use o percentual do diferimento da legislação (100.0000 quando é total).' }];
+            }) as [string, string, { note?: string }][]),
             fix: { text: `Inclua ${passos.join('; e ')}.` },
           });
         }
@@ -343,7 +413,7 @@ export function runNfeRules(nfe: XNode, ctx: RuleCtx): Finding[] {
         title: `${lbl[0].toUpperCase() + lbl.slice(1)} sem grupo IBSCBS`,
         message: 'Outros itens da nota têm o grupo IBS/CBS e este não. Os totais de IBS/CBS deixam de bater com a soma dos itens, e a SEFAZ rejeita.',
         ...at(det),
-        ghosts: ghosts(child(det, 'imposto'), [['IBSCBS', '<IBSCBS> CST, cClassTrib, gIBSCBS… </IBSCBS>']]),
+        ghosts: ghosts(child(det, 'imposto'), [['IBSCBS', '<IBSCBS> CST, cClassTrib, gIBSCBS… </IBSCBS>', ibsBaseFor(det)]]),
         fix: { text: 'Gere o grupo IBSCBS também neste item (no TX2, o bloco CST_UB13 ... vCBS_UB67 antes do SALVARITEM). Geralmente é falha na geração ou cadastro de tributação do produto incompleto.' },
       });
     }
@@ -393,14 +463,10 @@ export function runNfeRules(nfe: XNode, ctx: RuleCtx): Finding[] {
 
   /* ---------- totais ICMSTot ---------- */
   if (tot) {
-    const sum = (fn: (d: XNode) => XNode | undefined, filter?: (d: XNode) => boolean) => {
-      const ds = dets.filter(filter ?? (() => true));
-      if (ds.some((d) => bad(fn(d)))) return NaN;
-      return ds.reduce((s, d) => s + cents(num(fn(d)) ?? 0), 0) / 100;
-    };
+    const sum = (fn: (d: XNode) => XNode | undefined, filter?: (d: XNode) => boolean) => dets.filter(filter ?? (() => true)).map(fn);
     const indTot1 = (d: XNode) => select(d, 'prod/indTot')?.text !== '0';
-    const T = (tag: string, expected: number, how: string, code?: string) =>
-      check({ node: child(tot, tag), expected, code, sev: 'erro', title: `Total ${tag} diferente da soma dos itens`, how });
+    const T = (tag: string, parts: (XNode | undefined)[], how: string, code?: string) =>
+      checkTotal({ node: child(tot, tag), parts, code, title: `Total ${tag} diferente da soma dos itens`, how });
     const g = (path: string) => (d: XNode) => select(d, path);
     const ic = (tag: string) => (d: XNode) => child(icmsGroup(d), tag);
     T('vBC', sum(ic('vBC')), 'Soma de vBC do ICMS dos itens', '531');
@@ -438,13 +504,8 @@ export function runNfeRules(nfe: XNode, ctx: RuleCtx): Finding[] {
   /* ---------- totais IBS/CBS ---------- */
   const tIBS = select(inf, 'total/IBSCBSTot');
   if (tIBS && anyIBS) {
-    const s = (path: string) => {
-      const ns = dets.map((d) => select(d, 'imposto/IBSCBS/gIBSCBS/' + path));
-      if (ns.some(bad)) return NaN;
-      return ns.reduce((acc, n) => acc + cents(num(n) ?? 0), 0) / 100;
-    };
     const T = (tPath: string, iPath: string, code?: string) =>
-      check({ node: select(tIBS, tPath), expected: s(iPath), sev: 'erro', code, title: `Total ${tPath.split('/').pop()} (IBS/CBS) diferente da soma dos itens`, how: `Soma de ${iPath.split('/').pop()} dos itens` });
+      checkTotal({ node: select(tIBS, tPath), parts: dets.map((d) => select(d, 'imposto/IBSCBS/gIBSCBS/' + iPath)), code, title: `Total ${tPath.split('/').pop()} (IBS/CBS) diferente da soma dos itens`, how: `Soma de ${iPath.split('/').pop()} dos itens` });
     T('vBCIBSCBS', 'vBC');
     T('gIBS/gIBSUF/vIBSUF', 'gIBSUF/vIBSUF', '1080');
     T('gIBS/gIBSMun/vIBSMun', 'gIBSMun/vIBSMun');

@@ -53,6 +53,10 @@ export interface Ghost {
   fill?: boolean;
   /** formato do texto: tag XML ou linha de TX2 */
   format?: 'xml' | 'tx2';
+  /** valores calculados para os campos de um grupo que falta (nome do campo -> valor) */
+  values?: Record<string, string>;
+  /** de onde saiu o valor (mostrado no card) */
+  note?: string;
   /** uso interno: grupo e nome da tag que falta */
   parent?: XNode;
   name?: string;

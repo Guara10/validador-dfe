@@ -59,7 +59,11 @@ describe('TX2', () => {
   it('cálculos: total ICMS, vNF e IBS UF', async () => {
     const a = await run('erro-calculos.tx2');
     const t = titles(a);
-    expect(t).toContain('532 Total vICMS diferente da soma dos itens');
+    // o total vICMS (318,00) está certo: quem está errado é o vICMS do item 2 (183,00 em vez de 138,00)
+    expect(t).not.toContain('532 Total vICMS diferente da soma dos itens');
+    const item = a.findings.find((f) => f.title === 'vICMS diferente de vBC × pICMS (item 2)')!;
+    expect(item.fix?.value).toBe('138.00');
+    expect(item.message).toContain('total vICMS');
     expect(t).toContain('610 Total da nota (vNF) não fecha com os totais');
     expect(a.findings.find((f) => f.code === '610')?.fix?.value).toBe('2650.00');
   });
@@ -120,6 +124,15 @@ describe('caracteres inválidos', () => {
   });
 });
 
+describe('total x item', () => {
+  it('total errado de verdade continua sendo apontado no total', async () => {
+    const t = ex('nfe-valida.tx2').replace('vICMS_W04=318.00', 'vICMS_W04=320.00');
+    const a = (await analyze(t, eng))[0];
+    const f = a.findings.find((x) => x.code === '532')!;
+    expect(f.fix?.value).toBe('318.00');
+  });
+});
+
 describe('posição da tag que falta', () => {
   const lineAt = (xml: string, n: number) => xml.split('\n')[n - 1].trim();
   it('929: pRedBC entra logo depois de modBC no XML montado', async () => {
@@ -147,10 +160,21 @@ describe('posição da tag que falta', () => {
     expect(g.group).toBe(true);
     expect(lineAt(a.generatedXml!, g.afterLine + 1)).toBe('</imposto>');
     const t = f.ghosts![0];
-    expect(t.text.split('\n')).toEqual(['CST_UB13=…', 'cClassTrib_UB14=…', 'vBC_UB16=…', 'pIBSUF_UB18=…', 'vIBSUF_UB35=…', 'pIBSMun_UB37=…', 'vIBSMun_UB54=…', 'vIBS_UB54a=…', 'pCBS_UB56=…', 'vCBS_UB67=…']);
+    expect(t.text.split('\n')).toEqual(['CST_UB13=…', 'cClassTrib_UB14=…', 'vBC_UB16=1150.00', 'pIBSUF_UB18=…', 'vIBSUF_UB35=…', 'pIBSMun_UB37=…', 'vIBSMun_UB54=…', 'vIBS_UB54a=…', 'pCBS_UB56=…', 'vCBS_UB67=…']);
     const lines = ex('erro-1080-item-sem-ibscbs.tx2').split(/\r?\n/);
     expect(lines[t.afterLine - 1]).toBe('CST_S06=06');
     expect(lines[t.afterLine]).toMatch(/^vItem_VB01=/);
+  });
+  it('929: pDif e pRedBC calculados com os valores do grupo', async () => {
+    const base = ex('nfe-valida.tx2')
+      .replace('CST_N12=00', 'CST_N12=51')
+      .replace('vICMS_N17=180.00', 'vICMSOp_N16a=180.00\nvICMSDif_N16c=180.00\nvICMS_N17=0.00')
+      .replace('vICMS_W04=318.00', 'vICMS_W04=138.00');
+    const g1 = (await analyze(base, eng))[0].findings.find((x) => x.code === '929')!.ghosts!;
+    expect(g1.map((g) => g.text)).toEqual(['pRedBC_N14=0.00', 'pDif_N16b=100.0000']);
+    const reduzida = base.replace('vBC_N15=1500.00', 'vBC_N15=1200.00').replace('vBC_W03=2650.00', 'vBC_W03=2350.00');
+    const g2 = (await analyze(reduzida, eng))[0].findings.find((x) => x.code === '929')!.ghosts!;
+    expect(g2[0].text).toBe('pRedBC_N14=20.0000');
   });
   it('XML: natOp entra entre cNF e mod', async () => {
     const a = await run('erro-schema-variados.xml');
@@ -179,7 +203,9 @@ describe('XML', () => {
     const t = titles(a);
     expect(t).toContain('502 Chave de acesso não bate com os dados da nota');
     expect(t).toContain('629 vProd diferente de qCom × vUnCom (item 2)');
-    expect(t).toContain('564 Total vProd diferente da soma dos itens');
+    // o total vProd (2650,00) está certo: o erro é só o vProd do item 2
+    expect(t).not.toContain('564 Total vProd diferente da soma dos itens');
+    expect(a.findings.find((f) => f.code === '629')!.message).toContain('total vProd');
   });
   it('XML malformado', async () => {
     const a = (await analyze('<NFe><infNFe><ide></infNFe></NFe>', eng))[0];

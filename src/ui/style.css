@@ -154,6 +154,11 @@ main.wrap { padding-block: 18px 48px; display: grid; gap: 16px; }
 .ln.ghost .n { color: var(--ok); font-weight: 600; }
 .ln.ghost .t { color: var(--ok); }
 .ln.ghost .t .tk-tag { color: var(--ok); }
+.ln.removed { background: var(--erro-bg); }
+.ln.removed .n, .ln.removed .t { color: var(--erro); }
+.ln.removed .t .tk-key, .ln.removed .t .tk-tag { color: var(--erro); }
+.ln.removed .t { text-decoration: line-through; text-decoration-thickness: 1px; }
+.ghost-note.old { color: var(--erro); text-decoration: none; display: inline-block; }
 .ln.fill { box-shadow: inset 3px 0 0 var(--ok); }
 .ghost-note { margin-left: 12px; font-family: var(--f-body); font-size: 11.5px; font-weight: 600; letter-spacing: 0.02em; color: var(--ok); }
 .where { display: grid; gap: 6px; border-top: 1px dashed var(--rule); padding-top: 8px; }

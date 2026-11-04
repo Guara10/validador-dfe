@@ -204,14 +204,20 @@ function applyTarget(f: Finding, a: Analysis): ((text: string) => string | null)
   };
 }
 
-/** Insere no arquivo as linhas/tags que faltam (prévias). Só quando todas têm valor conhecido. */
-const canInsert = (f: Finding) => !!f.ghosts?.length && f.ghosts.every((g) => !g.fill && !g.text.includes('…') && !/_\?=/.test(g.text));
+/** Prévias que dá para inserir sem digitar nada: valor conhecido e ID do leiaute conhecido. */
+const insertable = (f: Finding) => (f.ghosts ?? []).filter((g) => !g.fill && !g.text.includes('…') && !/_\?=/.test(g.text));
+const canInsert = (f: Finding) => insertable(f).length > 0;
+const insertLabel = (f: Finding) => {
+  const ok = insertable(f);
+  if (ok.length === (f.ghosts ?? []).length) return 'Inserir no arquivo';
+  return 'Inserir ' + ok.map((g) => (g.format === 'tx2' ? g.text.split('=')[0] : g.name)).join(' e ');
+};
 function insertTarget(f: Finding): ((text: string) => string | null) | null {
   if (!canInsert(f)) return null;
   return (text) => {
     const nl = text.includes('\r\n') ? '\r\n' : '\n';
     const lines = text.split(/\r?\n/);
-    const gs = [...f.ghosts!].sort((x, y) => y.afterLine - x.afterLine);
+    const gs = [...insertable(f)].sort((x, y) => y.afterLine - x.afterLine);
     for (const g of gs) {
       if (lines[g.afterLine - 1] === undefined) return null;
       const add = g.format === 'tx2' ? g.text.split('\n') : [('  '.repeat(g.depth)) + g.text];
@@ -360,16 +366,23 @@ function card(f: Finding, i: number, a: Analysis) {
         f.fix.value ? h('div', { class: 'val' },
           h('code', {}, f.fix.value),
           h('button', { class: 'btn small', type: 'button', onclick: () => copy(f.fix!.value!, 'Valor copiado') }, 'Copiar'),
-          canApply ? h('button', { class: 'btn small', type: 'button', onclick: () => apply(f) }, 'Aplicar no arquivo') : null,
         ) : null,
       ) : null,
+      canApply && !f.ghosts?.length ? h('div', { class: 'where' },
+        h('div', { class: 'where-head' },
+          h('span', { class: 'label' }, a.kind === 'tx2' ? 'Como fica no TX2' : 'Como fica no XML'),
+          h('span', { class: 'actions' },
+            h('button', { class: 'btn small', type: 'button', onclick: () => apply(f) }, 'Aplicar no arquivo'),
+            h('button', { class: 'btn small', type: 'button', onclick: () => focusLine(f.line!) }, a.kind === 'tx2' ? 'Ver no TX2' : 'Ver no arquivo'))),
+        changeSnippet(f, a)) : null,
       f.ghosts?.length ? h('div', { class: 'where' },
         h('div', { class: 'where-head' },
           h('span', { class: 'label' }, f.ghosts.every((g) => g.fill) ? (a.kind === 'tx2' ? 'O que preencher no TX2' : 'O que preencher no XML') : a.kind === 'tx2' ? 'Onde entra no TX2' : 'Onde entra no XML'),
           h('span', { class: 'actions' },
-            canInsert(f) ? h('button', { class: 'btn small', type: 'button', onclick: () => apply(f, 'insert') }, 'Inserir no arquivo') : null,
+            canInsert(f) ? h('button', { class: 'btn small', type: 'button', onclick: () => apply(f, 'insert') }, insertLabel(f)) : null,
             h('button', { class: 'btn small', type: 'button', onclick: () => showGhost(f) }, a.kind === 'tx2' ? 'Ver no TX2' : 'Ver no arquivo'))),
         ghostSnippet(f, a),
+        [...new Set((f.ghosts ?? []).map((g) => g.note).filter(Boolean))].map((n) => h('div', { class: 'doc' }, n!)),
         f.ghosts.some((g) => /_\?=/.test(g.text)) ? h('div', { class: 'doc' }, 'O ID do leiaute (depois do "_") desse campo não aparece em nenhuma linha deste TX2: confira no layout do TX2 antes de digitar.') : null) : null,
       f.doc && !(f.fix?.text ?? '').includes(f.doc) ? h('div', { class: 'doc' }, 'Leiaute: ', f.doc) : null,
     ),
@@ -445,6 +458,29 @@ function ghostSnippet(f: Finding, a: Analysis): HTMLElement | null {
   const hi = Math.max(...gs.map((g) => g.afterLine)) + 2;
   if (hi - lo > 16) for (const g of gs) range(g.afterLine - 1, g.afterLine + 1);
   else range(lo, hi);
+  return box;
+}
+/** Trecho do arquivo com a linha atual (riscada) e a linha corrigida. */
+function changeSnippet(f: Finding, a: Analysis): HTMLElement | null {
+  const src = S.text ?? a.source;
+  const fn = applyTarget(f, a);
+  const next = fn?.(src);
+  if (!next || !f.line) return null;
+  const kind: 'xml' | 'tx2' = a.kind;
+  const lines = src.replace(/\r?\n$/, '').split(/\r?\n/);
+  const newLine = next.split(/\r?\n/)[f.line - 1];
+  const box = h('div', { class: 'code snippet', 'aria-label': 'Linha corrigida' });
+  for (let n = Math.max(1, f.line - 2); n <= Math.min(lines.length, f.line + 2); n++) {
+    if (n !== f.line) { box.append(plainRow(n, lines[n - 1], kind)); continue; }
+    const old = document.createElement('div');
+    old.className = 'ln removed';
+    old.innerHTML = `<span class="n">${n}</span><span class="m"></span><span class="t">${tokenize(lines[n - 1], kind)}<span class="ghost-note old">valor atual</span></span>`;
+    box.append(old);
+    const nw = document.createElement('div');
+    nw.className = 'ln ghost';
+    nw.innerHTML = `<span class="n">${n}</span><span class="m"></span><span class="t">${tokenize(newLine, kind)}<span class="ghost-note">valor corrigido</span></span>`;
+    box.append(nw);
+  }
   return box;
 }
 function showGhost(f: Finding) {

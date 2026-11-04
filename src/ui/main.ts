@@ -1,5 +1,5 @@
 import './style.css';
-import type { Analysis, Finding } from '../core/types';
+import type { Analysis, Finding, Ghost } from '../core/types';
 import { analyze, type Engine } from '../core/analyze';
 import { nfeDict, nfeSchemas } from '../core/engine-data';
 import { createBrowserRunner } from '../browser/xsd-runner';
@@ -204,10 +204,24 @@ function applyTarget(f: Finding, a: Analysis): ((text: string) => string | null)
   };
 }
 
-async function apply(f: Finding) {
+function insertTarget(f: Finding): ((text: string) => string | null) | null {
+  const ins = f.fix?.insert;
+  if (!ins) return null;
+  return (text) => {
+    const nl = text.includes('\r\n') ? '\r\n' : '\n';
+    const lines = text.split(/\r?\n/);
+    const i = ins.afterLine - 1;
+    if (lines[i] === undefined) return null;
+    const indent = /^\s*/.exec(lines[i])![0];
+    lines.splice(i + 1, 0, indent + ins.text);
+    return lines.join(nl);
+  };
+}
+
+async function apply(f: Finding, mode: 'value' | 'insert' = 'value') {
   const a = S.results?.[S.note];
   if (!a || !S.text) return;
-  const fn = applyTarget(f, a);
+  const fn = mode === 'insert' ? insertTarget(f) : applyTarget(f, a);
   const next = fn?.(S.text);
   if (!next) { toast('Não deu para aplicar automaticamente: edite o arquivo e valide de novo.'); return; }
   S.text = next;
@@ -345,7 +359,18 @@ function card(f: Finding, i: number, a: Analysis) {
           h('button', { class: 'btn small', type: 'button', onclick: () => copy(f.fix!.value!, 'Valor copiado') }, 'Copiar'),
           canApply ? h('button', { class: 'btn small', type: 'button', onclick: () => apply(f) }, 'Aplicar no arquivo') : null,
         ) : null,
+        f.fix.insert ? h('div', { class: 'val' },
+          h('span', {}, `Inserir depois da linha ${f.fix.insert.afterLine}:`),
+          h('code', {}, f.fix.insert.text),
+          h('button', { class: 'btn small', type: 'button', onclick: () => copy(f.fix!.insert!.text, 'Linha copiada') }, 'Copiar'),
+          h('button', { class: 'btn small', type: 'button', onclick: () => apply(f, 'insert') }, 'Inserir no arquivo'),
+        ) : null,
       ) : null,
+      f.ghosts?.length ? h('div', { class: 'where' },
+        h('div', { class: 'where-head' },
+          h('span', { class: 'label' }, a.kind === 'tx2' ? 'Onde entra no XML montado' : 'Onde entra no XML'),
+          h('button', { class: 'btn small', type: 'button', onclick: () => showGhost(f, a) }, a.kind === 'tx2' ? 'Ver no XML montado' : 'Ver no arquivo')),
+        ghostSnippet(f, a)) : null,
       f.doc && !(f.fix?.text ?? '').includes(f.doc) ? h('div', { class: 'doc' }, 'Leiaute: ', f.doc) : null,
     ),
   );
@@ -380,6 +405,54 @@ function tokenize(line: string, kind: 'xml' | 'tx2'): string {
   return esc(line).replace(/(&lt;\/?)([\w:]+)([^&]*?)(\/?&gt;)/g, '<span class="tk-tag">$1$2</span>$3<span class="tk-tag">$4</span>');
 }
 
+/* ---------- tag que falta: prévia na posição certa ---------- */
+const xmlTextOf = (a: Analysis) => (a.kind === 'tx2' ? a.generatedXml ?? '' : S.text ?? a.source);
+function ghostRow(g: Ghost, id?: string): HTMLElement {
+  const row = document.createElement('div');
+  row.className = 'ln ghost';
+  if (id) row.id = id;
+  row.innerHTML = `<span class="n">+</span><span class="m"></span><span class="t">${'  '.repeat(g.depth)}${tokenize(g.text, 'xml')}<span class="ghost-note">${g.group ? 'grupo que falta' : 'falta aqui'}</span></span>`;
+  return row;
+}
+function plainRow(n: number, l: string): HTMLElement {
+  const row = document.createElement('div');
+  row.className = 'ln';
+  row.innerHTML = `<span class="n">${n}</span><span class="m"></span><span class="t">${tokenize(l, 'xml') || ' '}</span>`;
+  return row;
+}
+function ghostSnippet(f: Finding, a: Analysis): HTMLElement | null {
+  const gs = f.ghosts ?? [];
+  const xml = xmlTextOf(a);
+  if (!gs.length || !xml) return null;
+  const lines = xml.replace(/\n$/, '').split('\n');
+  const lo = Math.max(1, Math.min(...gs.map((g) => g.afterLine)) - 2);
+  const hi = Math.min(lines.length, Math.max(...gs.map((g) => g.afterLine)) + 2);
+  const box = h('div', { class: 'code snippet', 'aria-label': 'Onde a tag entra no XML' });
+  if (hi - lo > 16) {
+    // tags distantes: um trecho curto para cada
+    for (const g of gs) {
+      for (let n = Math.max(1, g.afterLine - 1); n <= g.afterLine; n++) box.append(plainRow(n, lines[n - 1]));
+      box.append(ghostRow(g));
+      if (lines[g.afterLine]) box.append(plainRow(g.afterLine + 1, lines[g.afterLine]));
+    }
+    return box;
+  }
+  for (let n = lo; n <= hi; n++) {
+    box.append(plainRow(n, lines[n - 1]));
+    for (const g of gs.filter((x) => x.afterLine === n)) box.append(ghostRow(g));
+  }
+  return box;
+}
+function showGhost(f: Finding, a: Analysis) {
+  if (a.kind === 'tx2') S.tab = 'xml';
+  render();
+  const g = f.ghosts![0];
+  const row = document.getElementById(`g${g.afterLine}`);
+  if (!row) return;
+  document.querySelectorAll('.ln.focus').forEach((e) => e.classList.remove('focus'));
+  row.scrollIntoView({ block: 'center', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+}
+
 function sourceBlock(a: Analysis) {
   const showXml = S.tab === 'xml' && a.generatedXml;
   const text = showXml ? a.generatedXml! : S.text ?? a.source;
@@ -388,6 +461,12 @@ function sourceBlock(a: Analysis) {
   if (!showXml) {
     const rank = { erro: 0, aviso: 1, info: 2 };
     for (const f of a.findings) if (f.line && (!marks.has(f.line) || rank[f.sev] < rank[marks.get(f.line)!])) marks.set(f.line, f.sev);
+  }
+  const ghostsAt = new Map<number, Ghost[]>();
+  if (kind === 'xml') for (const f of a.findings) for (const g of f.ghosts ?? []) {
+    const arr = ghostsAt.get(g.afterLine) ?? [];
+    if (!arr.some((x) => x.text === g.text)) arr.push(g);
+    ghostsAt.set(g.afterLine, arr);
   }
   const lines = text.replace(/\n$/, '').split(/\r?\n/);
   const code = h('div', { class: 'code', id: 'codigo', tabindex: '0', 'aria-label': 'Conteúdo do arquivo' });
@@ -401,6 +480,7 @@ function sourceBlock(a: Analysis) {
     row.innerHTML = `<span class="n">${n}</span><span class="m"${sev ? ' title="Ver o problema desta linha"' : ''}></span><span class="t">${tokenize(l, kind) || ' '}</span>`;
     if (sev) row.querySelector('.m')!.addEventListener('click', () => focusCard(n));
     frag.append(row);
+    for (const g of ghostsAt.get(n) ?? []) frag.append(ghostRow(g, `g${n}`));
   });
   code.append(frag);
 

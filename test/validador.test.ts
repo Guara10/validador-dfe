@@ -39,9 +39,18 @@ describe('TX2', () => {
     expect(titles(a)).toContain('1080 Item 2 sem grupo IBSCBS');
     expect(a.findings.find((f) => f.tx2Field === 'vIBSUF_W41')?.fix?.value).toBe('1.50');
   });
-  it('929: CST 51 sem pRedBC', async () => {
+  it('929: CST 51 sem pRedBC aponta a linha do modBC e sugere a linha a inserir', async () => {
     const a = await run('erro-929-cst51-sem-predbc.tx2');
     expect(titles(a)).toEqual(['929 CST 51 sem pRedBC (item 1)']);
+    const f = a.findings.find((x) => x.code === '929')!;
+    expect(f.tx2Field).toBe('modBC_N13');
+    expect(f.fix?.insert?.text).toBe('pRedBC_N14=0.00');
+    const lines = ex('erro-929-cst51-sem-predbc.tx2').split(/\r?\n/);
+    expect(lines[f.fix!.insert!.afterLine - 1]).toMatch(/^modBC_N13=/);
+    // depois de inserir, o aviso some
+    lines.splice(f.fix!.insert!.afterLine, 0, f.fix!.insert!.text);
+    const b = (await analyze(lines.join('\n'), eng))[0];
+    expect(b.findings.some((x) => x.code === '929')).toBe(false);
   });
   it('cálculos: total ICMS, vNF e IBS UF', async () => {
     const a = await run('erro-calculos.tx2');
@@ -104,6 +113,35 @@ describe('caracteres inválidos', () => {
   });
   it('travessão vira hífen', () => {
     expect(suggestValue('ADUBO – FOLIAR', nfeDict.get('NFe/infNFe/det/prod/xProd')!.f)?.value).toBe('ADUBO - FOLIAR');
+  });
+});
+
+describe('posição da tag que falta', () => {
+  const lineAt = (xml: string, n: number) => xml.split('\n')[n - 1].trim();
+  it('929: pRedBC entra logo depois de modBC no XML montado', async () => {
+    const a = await run('erro-929-cst51-sem-predbc.tx2');
+    const g = a.findings.find((x) => x.code === '929')!.ghosts![0];
+    expect(g.text).toBe('<pRedBC>0.00</pRedBC>');
+    expect(lineAt(a.generatedXml!, g.afterLine)).toBe('<modBC>3</modBC>');
+    expect(lineAt(a.generatedXml!, g.afterLine + 1)).toBe('<vBC>1500.00</vBC>');
+  });
+  it('225: cEnq entra antes de IPINT', async () => {
+    const a = await run('erro-225-cenq-vazio.tx2');
+    const g = a.findings.find((x) => x.code === '225')!.ghosts![0];
+    expect(lineAt(a.generatedXml!, g.afterLine)).toBe('<IPI>');
+    expect(lineAt(a.generatedXml!, g.afterLine + 1)).toBe('<IPINT>');
+  });
+  it('1080: grupo IBSCBS entra no fim do imposto', async () => {
+    const a = await run('erro-1080-item-sem-ibscbs.tx2');
+    const g = a.findings.find((x) => x.title.includes('sem grupo IBSCBS'))!.ghosts![0];
+    expect(g.group).toBe(true);
+    expect(lineAt(a.generatedXml!, g.afterLine + 1)).toBe('</imposto>');
+  });
+  it('XML: natOp entra entre cNF e mod', async () => {
+    const a = await run('erro-schema-variados.xml');
+    const g = a.findings.find((x) => x.title.includes('<natOp>'))!.ghosts![0];
+    expect(lineAt(a.source, g.afterLine)).toBe('<cNF>12345678</cNF>');
+    expect(lineAt(a.source, g.afterLine + 1)).toBe('<mod>55</mod>');
   });
 });
 

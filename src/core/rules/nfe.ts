@@ -1,5 +1,7 @@
 import type { Finding, XNode, DocSummary } from '../types';
 import { attr, child, childrenNamed, select, humanPath } from '../xml/parse';
+import type { Dict } from '../dict';
+import { ghostFor } from '../ghost';
 
 /**
  * Regras de conferência da NF-e que não dependem de opinião fiscal:
@@ -16,6 +18,8 @@ export interface RuleCtx {
   now?: Date;
   /** nota já autorizada (nfeProc com protocolo): regras de prazo de envio não se aplicam */
   autorizada?: boolean;
+  /** dicionário do leiaute, para mostrar onde entra a tag que falta */
+  dict?: Dict;
 }
 
 /** data/hora com fuso -> Date; undefined se fora do formato */
@@ -101,6 +105,11 @@ export function runNfeRules(nfe: XNode, ctx: RuleCtx): Finding[] {
   const tot = select(inf, 'total/ICMSTot');
 
   const at = (n: XNode | undefined) => ({ path: n ? humanPath(n) : undefined, line: ctx.lineOf(n), tx2Field: ctx.fieldOf(n) });
+  const ghosts = (parent: XNode | undefined, items: [string, string?][]) => {
+    if (!ctx.dict) return undefined;
+    const gs = items.map(([n, t]) => ghostFor(ctx.dict!, parent, n, t)).filter((g): g is NonNullable<typeof g> => !!g);
+    return gs.length ? gs : undefined;
+  };
   const itemLabel = (det: XNode) => `item ${attr(det, 'nItem') ?? dets.indexOf(det) + 1}`;
 
   /** confere valor x esperado; tol em reais */
@@ -288,12 +297,24 @@ export function runNfeRules(nfe: XNode, ctx: RuleCtx): Finding[] {
         if (vOp !== undefined && vDif !== undefined) check({ node: child(g, 'vICMS'), expected: vOp - vDif, tol: 0.01, sev: 'aviso', title: `vICMS diferente de vICMSOp − vICMSDif (${lbl})`, how: `${fmt2(vOp)} − ${fmt2(vDif)} = ${fmt2(r2(vOp - vDif))}` });
         const faltam = ['pRedBC', 'pDif'].filter((t) => !child(g, t));
         if (faltam.length) {
+          // aponta para o campo depois do qual o pRedBC entra (modBC, ou CST quando não há modBC)
+          const anchor = child(g, 'modBC') ?? child(g, 'CST');
+          const isTx2 = !!ctx.fieldOf(anchor);
+          const aLine = ctx.lineOf(anchor);
+          const nome = (tag: string, id: string) => (isTx2 ? `${tag}_${id}` : `<${tag}>`);
+          const passos: string[] = [];
+          if (faltam.includes('pRedBC')) passos.push(`${nome('pRedBC', 'N14')} com 0.00 (quando não há redução de base), logo depois de ${nome(anchor?.name ?? 'CST', anchor?.name === 'modBC' ? 'N13' : 'N12')}${aLine ? ` (linha ${aLine})` : ''}`);
+          if (faltam.includes('pDif')) passos.push(`${nome('pDif', 'N16b')} com o percentual do diferimento previsto na legislação (100.0000 quando o diferimento é total)${child(g, 'vICMSOp') ? `, depois de ${nome('vICMSOp', 'N16a')}` : ''}`);
           out.push({
             sev: 'aviso', origin: 'regra', code: '929',
             title: `CST 51 sem ${faltam.join(' e ')} (${lbl})`,
-            message: `O grupo ICMS51 está sem ${faltam.join(' e ')}. Algumas UFs (o PR, pela regra N07-10 do MOC) exigem esses campos sempre que o CST é 51, mesmo com valor zero, e rejeitam com 929 "CST de diferimento sem as informações de diferimento".`,
-            ...at(g), found: '(ausente)',
-            fix: { text: `Inclua ${faltam.map((f) => (f === 'pRedBC' ? 'pRedBC=0.00 quando não há redução de base' : 'pDif com o percentual do diferimento')).join(' e ')}. No TX2, pRedBC_N14 fica entre modBC_N13 e vBC_N15.` },
+            message: `O grupo ICMS51 do ${lbl} está sem ${faltam.join(' e ')}. Algumas UFs (o PR, pela regra N07-10 do MOC) exigem esses campos sempre que o CST é 51, mesmo com valor zero, e rejeitam com 929 "CST de diferimento sem as informações de diferimento". A linha marcada é onde o campo deve entrar.`,
+            ...at(anchor), found: '(ausente)',
+            ghosts: ghosts(g, faltam.map((t) => [t, t === 'pRedBC' ? '<pRedBC>0.00</pRedBC>' : '<pDif>…</pDif>'] as [string, string])),
+            fix: {
+              text: `Inclua ${passos.join('; e ')}.`,
+              insert: faltam.includes('pRedBC') && aLine ? { afterLine: aLine, text: isTx2 ? 'pRedBC_N14=0.00' : '<pRedBC>0.00</pRedBC>' } : undefined,
+            },
           });
         }
       } else if (vBC !== undefined && p !== undefined && child(g, 'vICMS')) {
@@ -325,6 +346,7 @@ export function runNfeRules(nfe: XNode, ctx: RuleCtx): Finding[] {
         title: `${lbl[0].toUpperCase() + lbl.slice(1)} sem grupo IBSCBS`,
         message: 'Outros itens da nota têm o grupo IBS/CBS e este não. Os totais de IBS/CBS deixam de bater com a soma dos itens, e a SEFAZ rejeita.',
         ...at(det),
+        ghosts: ghosts(child(det, 'imposto'), [['IBSCBS', '<IBSCBS> CST, cClassTrib, gIBSCBS… </IBSCBS>']]),
         fix: { text: 'Gere o grupo IBSCBS também neste item (no TX2, o bloco CST_UB13 ... vCBS_UB67 antes do SALVARITEM). Geralmente é falha na geração ou cadastro de tributação do produto incompleto.' },
       });
     }
@@ -367,7 +389,7 @@ export function runNfeRules(nfe: XNode, ctx: RuleCtx): Finding[] {
       const reg = child(gI, 'gTribRegular');
       if (reg) {
         const vazios = ['CSTReg', 'cClassTribReg'].filter((t) => !child(reg, t)?.text);
-        if (vazios.length) out.push({ sev: 'erro', origin: 'regra', code: '225', title: `Grupo gTribRegular incompleto (${lbl})`, message: `gTribRegular foi gerado sem ${vazios.join(' e ')}. Se a operação não tem tributação regular, o grupo inteiro não deve ser gerado.`, ...at(reg), fix: { text: 'Preencha CSTReg/cClassTribReg ou não gere gTribRegular (no TX2, campos CSTReg_UB69 e cClassTribReg_UB70 em diante).' } });
+        if (vazios.length) out.push({ sev: 'erro', origin: 'regra', code: '225', title: `Grupo gTribRegular incompleto (${lbl})`, message: `gTribRegular foi gerado sem ${vazios.join(' e ')}. Se a operação não tem tributação regular, o grupo inteiro não deve ser gerado.`, ...at(reg), ghosts: ghosts(reg, vazios.filter((t) => !child(reg, t)).map((t) => [t] as [string])), fix: { text: 'Preencha CSTReg/cClassTribReg ou não gere gTribRegular (no TX2, campos CSTReg_UB69 e cClassTribReg_UB70 em diante).' } });
       }
     }
   }

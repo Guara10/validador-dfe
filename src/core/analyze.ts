@@ -73,7 +73,7 @@ export async function analyzeXml(text: string, eng: Engine): Promise<Analysis> {
     findings.push(...tr);
   }
   if (nfe) {
-    findings.push(...runNfeRules(nfe, { lineOf: (n) => n?.fmtLine, fieldOf: () => undefined, now: eng.now?.(), autorizada: root.name === 'nfeProc' && !!descendants(root, 'protNFe').length }));
+    findings.push(...runNfeRules(nfe, { lineOf: (n) => n?.fmtLine, fieldOf: () => undefined, now: eng.now?.(), dict: eng.dict, autorizada: root.name === 'nfeProc' && !!descendants(root, 'protNFe').length }));
   }
   return { kind: 'xml', source: formatted, findings: sortFindings(dedupe(findings)), summary: nfe ? summarize(nfe, root) : {}, schemaOk };
 }
@@ -96,7 +96,7 @@ export async function analyzeTx2(text: string, eng: Engine): Promise<Analysis[]>
     const tr = translateXsdErrors(raw, tctx).filter((f) => !(f.title === 'XML sem assinatura digital'));
     tr.push(...sweepTree(b.root, tctx, tr));
     const findings: Finding[] = [...b.problems, ...tr];
-    findings.push(...runNfeRules(b.root, { lineOf: (n) => n?.tx2Line, fieldOf: (n) => n?.tx2Field, now: eng.now?.() }));
+    findings.push(...runNfeRules(b.root, { lineOf: (n) => n?.tx2Line, fieldOf: (n) => n?.tx2Field, now: eng.now?.(), dict: eng.dict }));
     // campos vazios em grupos que foram gerados: aviso leve (podem virar tag vazia dependendo do componente)
     const schemaOk = !tr.some((f) => f.sev === 'erro');
     if (b.idGenerated) {

@@ -1,6 +1,7 @@
 import type { Finding, XNode } from '../types';
 import { Dict, describeFormat, suggestValue, valueOk, badCharInfo, type DNode, minOf, maxOf } from '../dict';
 import { dictPath, humanPath } from '../xml/parse';
+import { ghostFor } from '../ghost';
 
 export interface RawXsdError {
   line: number | null;
@@ -304,6 +305,8 @@ function unexpectedFinding(ctx: TranslateCtx, node: XNode | undefined, el: strin
     base.expected = describeFormat(xd?.f) || undefined;
     if (empty) base.line = empty.line, base.tx2Field = empty.field;
     base.fix = { text: grpFix(x, xd) };
+    const g = ghostFor(ctx.dict, parent, x);
+    if (g) base.ghosts = [g];
     return base;
   }
   if (!isChild) {
@@ -372,6 +375,7 @@ function missingFinding(ctx: TranslateCtx, node: XNode | undefined, el: string, 
     doc: shortDoc(xd?.d),
     expected: describeFormat(xd?.f) || undefined,
     fix: { text: grpFix(exp[0], xd) },
+    ghosts: ((g) => (g ? [g] : undefined))(ghostFor(ctx.dict, node, exp[0])),
   };
 }
 

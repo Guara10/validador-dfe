@@ -37,6 +37,20 @@ export interface Fix {
   text: string;
   /** valor sugerido, quando dá para calcular */
   value?: string;
+  /** linha a inserir no arquivo (campo que falta), logo depois de afterLine */
+  insert?: { afterLine: number; text: string };
+}
+
+/** Tag que falta, mostrada na posição em que deve entrar no XML exibido. */
+export interface Ghost {
+  /** linha do XML exibido depois da qual a tag entra */
+  afterLine: number;
+  /** nível de indentação (2 espaços por nível) */
+  depth: number;
+  /** texto da tag, ex.: <pRedBC>0.00</pRedBC> ou <cEnq>…</cEnq> */
+  text: string;
+  /** é um grupo inteiro (ex.: IBSCBS), não um campo */
+  group?: boolean;
 }
 
 export interface Finding {
@@ -56,6 +70,8 @@ export interface Finding {
   fix?: Fix;
   /** descrição oficial do campo (documentação do XSD) */
   doc?: string;
+  /** tags que faltam, com a posição no XML exibido */
+  ghosts?: Ghost[];
 }
 
 export interface DocSummary {

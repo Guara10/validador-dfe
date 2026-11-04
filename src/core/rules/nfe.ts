@@ -308,13 +308,10 @@ export function runNfeRules(nfe: XNode, ctx: RuleCtx): Finding[] {
           out.push({
             sev: 'aviso', origin: 'regra', code: '929',
             title: `CST 51 sem ${faltam.join(' e ')} (${lbl})`,
-            message: `O grupo ICMS51 do ${lbl} está sem ${faltam.join(' e ')}. Algumas UFs (o PR, pela regra N07-10 do MOC) exigem esses campos sempre que o CST é 51, mesmo com valor zero, e rejeitam com 929 "CST de diferimento sem as informações de diferimento". A linha marcada é onde o campo deve entrar.`,
+            message: `O grupo ICMS51 do ${lbl} está sem ${faltam.join(' e ')}. Algumas UFs (o PR, pela regra N07-10 do MOC) exigem esses campos sempre que o CST é 51, mesmo com valor zero, e rejeitam com 929 "CST de diferimento sem as informações de diferimento". O campo entra logo depois da linha marcada.`,
             ...at(anchor), found: '(ausente)',
             ghosts: ghosts(g, faltam.map((t) => [t, t === 'pRedBC' ? '<pRedBC>0.00</pRedBC>' : '<pDif>…</pDif>'] as [string, string])),
-            fix: {
-              text: `Inclua ${passos.join('; e ')}.`,
-              insert: faltam.includes('pRedBC') && aLine ? { afterLine: aLine, text: isTx2 ? 'pRedBC_N14=0.00' : '<pRedBC>0.00</pRedBC>' } : undefined,
-            },
+            fix: { text: `Inclua ${passos.join('; e ')}.` },
           });
         }
       } else if (vBC !== undefined && p !== undefined && child(g, 'vICMS')) {

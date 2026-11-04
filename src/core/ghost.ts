@@ -16,5 +16,5 @@ export function ghostFor(dict: Dict, parent: XNode | undefined, name: string, te
   const group = !!dn?.c?.length;
   const next = dn ? parent.children.find((c) => order(c) > dn.o) : undefined;
   const afterLine = next?.fmtLine !== undefined ? next.fmtLine - 1 : (parent.fmtEndLine ?? parent.fmtLine) - 1;
-  return { afterLine, depth, group, text: text ?? `<${name}>…</${name}>` };
+  return { afterLine, depth, group, text: text ?? `<${name}>…</${name}>`, format: 'xml', parent, name };
 }

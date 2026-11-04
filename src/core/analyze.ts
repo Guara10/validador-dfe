@@ -4,7 +4,7 @@ import { parseXml, XmlSyntaxError, child, descendants } from './xml/parse';
 import { formatXml } from './xml/format';
 import { translateXsdErrors, sweepTree, type RawXsdError } from './xsd/translate';
 import { runNfeRules, summarize } from './rules/nfe';
-import { looksLikeTx2, parseTx2, buildFromTx2, makeEmptyLookup } from './tx2/tx2';
+import { looksLikeTx2, parseTx2, buildFromTx2, makeEmptyLookup, tx2GhostFrom } from './tx2/tx2';
 
 /** Executa o xmllint (wasm) — implementado para navegador e para Node (testes). */
 export interface XsdRunner {
@@ -75,6 +75,7 @@ export async function analyzeXml(text: string, eng: Engine): Promise<Analysis> {
   if (nfe) {
     findings.push(...runNfeRules(nfe, { lineOf: (n) => n?.fmtLine, fieldOf: () => undefined, now: eng.now?.(), dict: eng.dict, autorizada: root.name === 'nfeProc' && !!descendants(root, 'protNFe').length }));
   }
+  pointToGhost(findings, false);
   return { kind: 'xml', source: formatted, findings: sortFindings(dedupe(findings)), summary: nfe ? summarize(nfe, root) : {}, schemaOk };
 }
 
@@ -103,6 +104,14 @@ export async function analyzeTx2(text: string, eng: Engine): Promise<Analysis[]>
       const ch = child(b.root.children[0], 'ide') ? b.root.children[0].attrs.find((a) => a.name === 'Id')?.value : undefined;
       if (ch && !/^NFe0+$/.test(ch)) findings.push({ sev: 'info', origin: 'estrutura', title: 'Chave calculada a partir do TX2', message: `O TX2 não traz Id_A03; para validar, a chave foi montada com os campos da nota: ${ch.slice(3)}.`, line: note.startLine });
     }
+    // prévias: no TX2, mostra a linha de TX2 que falta; a de XML fica para a aba do XML montado
+    for (const f of findings) {
+      if (!f.ghosts?.length) continue;
+      f.xmlGhosts = f.ghosts;
+      const t = f.ghosts.map((g) => tx2GhostFrom(g, b, eng.dict)).filter((g): g is NonNullable<typeof g> => !!g);
+      f.ghosts = t.length ? t : undefined;
+    }
+    pointToGhost(findings, true);
     out.push({
       kind: 'tx2', source: text, generatedXml: xml,
       findings: sortFindings(dedupe(findings)),
@@ -112,6 +121,16 @@ export async function analyzeTx2(text: string, eng: Engine): Promise<Analysis[]>
     });
   }
   return out;
+}
+
+/** Quando há prévia de tag que falta, a linha marcada passa a ser a linha depois da qual ela entra. */
+function pointToGhost(fs: Finding[], tx2: boolean) {
+  for (const f of fs) {
+    const g = f.ghosts?.[0];
+    if (!g || g.fill || f.fix?.value) continue;
+    f.line = g.afterLine;
+    if (tx2) f.tx2Field = g.text.split('=')[0];
+  }
 }
 
 function dedupe(f: Finding[]): Finding[] {

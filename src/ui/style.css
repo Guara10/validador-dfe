@@ -154,8 +154,10 @@ main.wrap { padding-block: 18px 48px; display: grid; gap: 16px; }
 .ln.ghost .n { color: var(--ok); font-weight: 600; }
 .ln.ghost .t { color: var(--ok); }
 .ln.ghost .t .tk-tag { color: var(--ok); }
+.ln.fill { box-shadow: inset 3px 0 0 var(--ok); }
 .ghost-note { margin-left: 12px; font-family: var(--f-body); font-size: 11.5px; font-weight: 600; letter-spacing: 0.02em; color: var(--ok); }
 .where { display: grid; gap: 6px; border-top: 1px dashed var(--rule); padding-top: 8px; }
+.where-head .actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .where-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; }
 .where .label { font-size: 13px; font-weight: 600; }
 .code.snippet { min-height: 0; max-height: none; border: 1px solid var(--rule); border-radius: var(--r); background: var(--paper); font-size: 12px; }

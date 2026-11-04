@@ -39,16 +39,20 @@ describe('TX2', () => {
     expect(titles(a)).toContain('1080 Item 2 sem grupo IBSCBS');
     expect(a.findings.find((f) => f.tx2Field === 'vIBSUF_W41')?.fix?.value).toBe('1.50');
   });
-  it('929: CST 51 sem pRedBC aponta a linha do modBC e sugere a linha a inserir', async () => {
+  it('929: CST 51 sem pRedBC aponta a linha do modBC e mostra a linha de TX2 a inserir', async () => {
     const a = await run('erro-929-cst51-sem-predbc.tx2');
     expect(titles(a)).toEqual(['929 CST 51 sem pRedBC (item 1)']);
     const f = a.findings.find((x) => x.code === '929')!;
-    expect(f.tx2Field).toBe('modBC_N13');
-    expect(f.fix?.insert?.text).toBe('pRedBC_N14=0.00');
+    // a linha marcada é a do modBC (o campo entra logo depois) e o campo mostrado é o que falta
+    expect(f.tx2Field).toBe('pRedBC_N14');
+    const g = f.ghosts![0];
+    expect(f.line).toBe(g.afterLine);
+    expect(g.format).toBe('tx2');
+    expect(g.text).toBe('pRedBC_N14=0.00');
     const lines = ex('erro-929-cst51-sem-predbc.tx2').split(/\r?\n/);
-    expect(lines[f.fix!.insert!.afterLine - 1]).toMatch(/^modBC_N13=/);
+    expect(lines[g.afterLine - 1]).toMatch(/^modBC_N13=/);
     // depois de inserir, o aviso some
-    lines.splice(f.fix!.insert!.afterLine, 0, f.fix!.insert!.text);
+    lines.splice(g.afterLine, 0, g.text);
     const b = (await analyze(lines.join('\n'), eng))[0];
     expect(b.findings.some((x) => x.code === '929')).toBe(false);
   });
@@ -120,22 +124,33 @@ describe('posição da tag que falta', () => {
   const lineAt = (xml: string, n: number) => xml.split('\n')[n - 1].trim();
   it('929: pRedBC entra logo depois de modBC no XML montado', async () => {
     const a = await run('erro-929-cst51-sem-predbc.tx2');
-    const g = a.findings.find((x) => x.code === '929')!.ghosts![0];
+    const g = a.findings.find((x) => x.code === '929')!.xmlGhosts![0];
     expect(g.text).toBe('<pRedBC>0.00</pRedBC>');
     expect(lineAt(a.generatedXml!, g.afterLine)).toBe('<modBC>3</modBC>');
     expect(lineAt(a.generatedXml!, g.afterLine + 1)).toBe('<vBC>1500.00</vBC>');
   });
-  it('225: cEnq entra antes de IPINT', async () => {
+  it('225: cEnq entra antes de IPINT no XML montado; no TX2 é a linha vazia a preencher', async () => {
     const a = await run('erro-225-cenq-vazio.tx2');
-    const g = a.findings.find((x) => x.code === '225')!.ghosts![0];
+    const f = a.findings.find((x) => x.code === '225')!;
+    const g = f.xmlGhosts![0];
     expect(lineAt(a.generatedXml!, g.afterLine)).toBe('<IPI>');
     expect(lineAt(a.generatedXml!, g.afterLine + 1)).toBe('<IPINT>');
+    const t = f.ghosts![0];
+    expect(t.fill).toBe(true);
+    expect(t.text).toBe('cEnq_O06=…');
+    expect(ex('erro-225-cenq-vazio.tx2').split(/\r?\n/)[t.afterLine - 1]).toBe('cEnq_O06=');
   });
-  it('1080: grupo IBSCBS entra no fim do imposto', async () => {
+  it('1080: grupo IBSCBS entra no fim do imposto (XML) e depois do COFINS do item (TX2)', async () => {
     const a = await run('erro-1080-item-sem-ibscbs.tx2');
-    const g = a.findings.find((x) => x.title.includes('sem grupo IBSCBS'))!.ghosts![0];
+    const f = a.findings.find((x) => x.title.includes('sem grupo IBSCBS'))!;
+    const g = f.xmlGhosts![0];
     expect(g.group).toBe(true);
     expect(lineAt(a.generatedXml!, g.afterLine + 1)).toBe('</imposto>');
+    const t = f.ghosts![0];
+    expect(t.text.split('\n')).toEqual(['CST_UB13=…', 'cClassTrib_UB14=…', 'vBC_UB16=…', 'pIBSUF_UB18=…', 'vIBSUF_UB35=…', 'pIBSMun_UB37=…', 'vIBSMun_UB54=…', 'vIBS_UB54a=…', 'pCBS_UB56=…', 'vCBS_UB67=…']);
+    const lines = ex('erro-1080-item-sem-ibscbs.tx2').split(/\r?\n/);
+    expect(lines[t.afterLine - 1]).toBe('CST_S06=06');
+    expect(lines[t.afterLine]).toMatch(/^vItem_VB01=/);
   });
   it('XML: natOp entra entre cNF e mod', async () => {
     const a = await run('erro-schema-variados.xml');

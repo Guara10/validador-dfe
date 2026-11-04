@@ -204,16 +204,19 @@ function applyTarget(f: Finding, a: Analysis): ((text: string) => string | null)
   };
 }
 
+/** Insere no arquivo as linhas/tags que faltam (prévias). Só quando todas têm valor conhecido. */
+const canInsert = (f: Finding) => !!f.ghosts?.length && f.ghosts.every((g) => !g.fill && !g.text.includes('…') && !/_\?=/.test(g.text));
 function insertTarget(f: Finding): ((text: string) => string | null) | null {
-  const ins = f.fix?.insert;
-  if (!ins) return null;
+  if (!canInsert(f)) return null;
   return (text) => {
     const nl = text.includes('\r\n') ? '\r\n' : '\n';
     const lines = text.split(/\r?\n/);
-    const i = ins.afterLine - 1;
-    if (lines[i] === undefined) return null;
-    const indent = /^\s*/.exec(lines[i])![0];
-    lines.splice(i + 1, 0, indent + ins.text);
+    const gs = [...f.ghosts!].sort((x, y) => y.afterLine - x.afterLine);
+    for (const g of gs) {
+      if (lines[g.afterLine - 1] === undefined) return null;
+      const add = g.format === 'tx2' ? g.text.split('\n') : [('  '.repeat(g.depth)) + g.text];
+      lines.splice(g.afterLine, 0, ...add);
+    }
     return lines.join(nl);
   };
 }
@@ -336,7 +339,7 @@ function stamp(code: string | undefined, sev: Finding['sev'], title?: string) {
 function card(f: Finding, i: number, a: Analysis) {
   const canApply = !!applyTarget(f, a);
   const meta = h('div', { class: 'meta' },
-    f.line ? h('button', { class: 'line-btn', type: 'button', title: 'Mostrar no arquivo', onclick: () => focusLine(f.line!) }, `linha ${f.line}`) : null,
+    f.line ? h('button', { class: 'line-btn', type: 'button', title: 'Mostrar no arquivo', onclick: () => focusLine(f.line!) }, f.ghosts?.length && !f.ghosts[0].fill ? `depois da linha ${f.line}` : `linha ${f.line}`) : null,
     f.tx2Field ? h('code', {}, f.tx2Field) : null,
     f.path ? h('span', { class: 'path' }, f.path) : null,
     f.code && REJ[f.code] ? h('span', {}, REJ[f.code]) : null,
@@ -359,18 +362,15 @@ function card(f: Finding, i: number, a: Analysis) {
           h('button', { class: 'btn small', type: 'button', onclick: () => copy(f.fix!.value!, 'Valor copiado') }, 'Copiar'),
           canApply ? h('button', { class: 'btn small', type: 'button', onclick: () => apply(f) }, 'Aplicar no arquivo') : null,
         ) : null,
-        f.fix.insert ? h('div', { class: 'val' },
-          h('span', {}, `Inserir depois da linha ${f.fix.insert.afterLine}:`),
-          h('code', {}, f.fix.insert.text),
-          h('button', { class: 'btn small', type: 'button', onclick: () => copy(f.fix!.insert!.text, 'Linha copiada') }, 'Copiar'),
-          h('button', { class: 'btn small', type: 'button', onclick: () => apply(f, 'insert') }, 'Inserir no arquivo'),
-        ) : null,
       ) : null,
       f.ghosts?.length ? h('div', { class: 'where' },
         h('div', { class: 'where-head' },
-          h('span', { class: 'label' }, a.kind === 'tx2' ? 'Onde entra no XML montado' : 'Onde entra no XML'),
-          h('button', { class: 'btn small', type: 'button', onclick: () => showGhost(f, a) }, a.kind === 'tx2' ? 'Ver no XML montado' : 'Ver no arquivo')),
-        ghostSnippet(f, a)) : null,
+          h('span', { class: 'label' }, f.ghosts.every((g) => g.fill) ? (a.kind === 'tx2' ? 'O que preencher no TX2' : 'O que preencher no XML') : a.kind === 'tx2' ? 'Onde entra no TX2' : 'Onde entra no XML'),
+          h('span', { class: 'actions' },
+            canInsert(f) ? h('button', { class: 'btn small', type: 'button', onclick: () => apply(f, 'insert') }, 'Inserir no arquivo') : null,
+            h('button', { class: 'btn small', type: 'button', onclick: () => showGhost(f) }, a.kind === 'tx2' ? 'Ver no TX2' : 'Ver no arquivo'))),
+        ghostSnippet(f, a),
+        f.ghosts.some((g) => /_\?=/.test(g.text)) ? h('div', { class: 'doc' }, 'O ID do leiaute (depois do "_") desse campo não aparece em nenhuma linha deste TX2: confira no layout do TX2 antes de digitar.') : null) : null,
       f.doc && !(f.fix?.text ?? '').includes(f.doc) ? h('div', { class: 'doc' }, 'Leiaute: ', f.doc) : null,
     ),
   );
@@ -406,50 +406,52 @@ function tokenize(line: string, kind: 'xml' | 'tx2'): string {
 }
 
 /* ---------- tag que falta: prévia na posição certa ---------- */
-const xmlTextOf = (a: Analysis) => (a.kind === 'tx2' ? a.generatedXml ?? '' : S.text ?? a.source);
-function ghostRow(g: Ghost, id?: string): HTMLElement {
-  const row = document.createElement('div');
-  row.className = 'ln ghost';
-  if (id) row.id = id;
-  row.innerHTML = `<span class="n">+</span><span class="m"></span><span class="t">${'  '.repeat(g.depth)}${tokenize(g.text, 'xml')}<span class="ghost-note">${g.group ? 'grupo que falta' : 'falta aqui'}</span></span>`;
-  return row;
+function ghostRow(g: Ghost, id?: string): DocumentFragment {
+  const frag = document.createDocumentFragment();
+  const note = g.fill ? 'preencha aqui' : g.group ? 'grupo que falta' : 'falta aqui';
+  g.text.split('\n').forEach((t, i) => {
+    const row = document.createElement('div');
+    row.className = 'ln ghost';
+    if (id && i === 0) row.id = id;
+    const body = g.format === 'tx2' ? tokenize(t, 'tx2') : '  '.repeat(g.depth) + tokenize(t, 'xml');
+    row.innerHTML = `<span class="n">${g.fill ? g.afterLine : '+'}</span><span class="m"></span><span class="t">${body}${i === 0 ? `<span class="ghost-note">${note}</span>` : ''}</span>`;
+    frag.append(row);
+  });
+  return frag;
 }
-function plainRow(n: number, l: string): HTMLElement {
+function plainRow(n: number, l: string, kind: 'xml' | 'tx2'): HTMLElement {
   const row = document.createElement('div');
   row.className = 'ln';
-  row.innerHTML = `<span class="n">${n}</span><span class="m"></span><span class="t">${tokenize(l, 'xml') || ' '}</span>`;
+  row.innerHTML = `<span class="n">${n}</span><span class="m"></span><span class="t">${tokenize(l, kind) || ' '}</span>`;
   return row;
 }
+/** Trecho do arquivo enviado com a tag/linha que falta encaixada (ou a linha a preencher). */
 function ghostSnippet(f: Finding, a: Analysis): HTMLElement | null {
   const gs = f.ghosts ?? [];
-  const xml = xmlTextOf(a);
-  if (!gs.length || !xml) return null;
-  const lines = xml.replace(/\n$/, '').split('\n');
-  const lo = Math.max(1, Math.min(...gs.map((g) => g.afterLine)) - 2);
-  const hi = Math.min(lines.length, Math.max(...gs.map((g) => g.afterLine)) + 2);
-  const box = h('div', { class: 'code snippet', 'aria-label': 'Onde a tag entra no XML' });
-  if (hi - lo > 16) {
-    // tags distantes: um trecho curto para cada
-    for (const g of gs) {
-      for (let n = Math.max(1, g.afterLine - 1); n <= g.afterLine; n++) box.append(plainRow(n, lines[n - 1]));
-      box.append(ghostRow(g));
-      if (lines[g.afterLine]) box.append(plainRow(g.afterLine + 1, lines[g.afterLine]));
+  const src = S.text ?? a.source;
+  if (!gs.length || !src) return null;
+  const kind: 'xml' | 'tx2' = a.kind;
+  const lines = src.replace(/\r?\n$/, '').split(/\r?\n/);
+  const box = h('div', { class: 'code snippet', 'aria-label': 'Onde corrigir no arquivo' });
+  const range = (from: number, to: number) => {
+    for (let n = Math.max(1, from); n <= Math.min(lines.length, to); n++) {
+      const fill = gs.find((g) => g.fill && g.afterLine === n);
+      if (fill) box.append(ghostRow(fill));
+      else box.append(plainRow(n, lines[n - 1], kind));
+      for (const g of gs.filter((x) => !x.fill && x.afterLine === n)) box.append(ghostRow(g));
     }
-    return box;
-  }
-  for (let n = lo; n <= hi; n++) {
-    box.append(plainRow(n, lines[n - 1]));
-    for (const g of gs.filter((x) => x.afterLine === n)) box.append(ghostRow(g));
-  }
+  };
+  const lo = Math.min(...gs.map((g) => g.afterLine)) - 2;
+  const hi = Math.max(...gs.map((g) => g.afterLine)) + 2;
+  if (hi - lo > 16) for (const g of gs) range(g.afterLine - 1, g.afterLine + 1);
+  else range(lo, hi);
   return box;
 }
-function showGhost(f: Finding, a: Analysis) {
-  if (a.kind === 'tx2') S.tab = 'xml';
+function showGhost(f: Finding) {
+  S.tab = 'source';
   render();
-  const g = f.ghosts![0];
-  const row = document.getElementById(`g${g.afterLine}`);
+  const row = document.getElementById(`g${f.ghosts![0].afterLine}`);
   if (!row) return;
-  document.querySelectorAll('.ln.focus').forEach((e) => e.classList.remove('focus'));
   row.scrollIntoView({ block: 'center', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
 }
 
@@ -462,8 +464,11 @@ function sourceBlock(a: Analysis) {
     const rank = { erro: 0, aviso: 1, info: 2 };
     for (const f of a.findings) if (f.line && (!marks.has(f.line) || rank[f.sev] < rank[marks.get(f.line)!])) marks.set(f.line, f.sev);
   }
+  // prévias no formato do que está na tela: TX2 na aba TX2, XML no XML formatado ou montado
   const ghostsAt = new Map<number, Ghost[]>();
-  if (kind === 'xml') for (const f of a.findings) for (const g of f.ghosts ?? []) {
+  const fillAt = new Map<number, Ghost>();
+  for (const f of a.findings) for (const g of (showXml ? f.xmlGhosts : f.ghosts) ?? []) {
+    if (g.fill) { fillAt.set(g.afterLine, g); continue; }
     const arr = ghostsAt.get(g.afterLine) ?? [];
     if (!arr.some((x) => x.text === g.text)) arr.push(g);
     ghostsAt.set(g.afterLine, arr);
@@ -479,8 +484,13 @@ function sourceBlock(a: Analysis) {
     row.id = 'l' + n;
     row.innerHTML = `<span class="n">${n}</span><span class="m"${sev ? ' title="Ver o problema desta linha"' : ''}></span><span class="t">${tokenize(l, kind) || ' '}</span>`;
     if (sev) row.querySelector('.m')!.addEventListener('click', () => focusCard(n));
+    if (fillAt.has(n)) {
+      row.id = 'g' + n;
+      row.classList.add('fill');
+      row.querySelector('.t')!.insertAdjacentHTML('beforeend', '<span class="ghost-note">preencha aqui</span>');
+    }
     frag.append(row);
-    for (const g of ghostsAt.get(n) ?? []) frag.append(ghostRow(g, `g${n}`));
+    (ghostsAt.get(n) ?? []).forEach((g, k) => frag.append(ghostRow(g, k === 0 ? `g${n}` : undefined)));
   });
   code.append(frag);
 

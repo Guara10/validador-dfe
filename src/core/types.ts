@@ -37,8 +37,6 @@ export interface Fix {
   text: string;
   /** valor sugerido, quando dá para calcular */
   value?: string;
-  /** linha a inserir no arquivo (campo que falta), logo depois de afterLine */
-  insert?: { afterLine: number; text: string };
 }
 
 /** Tag que falta, mostrada na posição em que deve entrar no XML exibido. */
@@ -51,6 +49,13 @@ export interface Ghost {
   text: string;
   /** é um grupo inteiro (ex.: IBSCBS), não um campo */
   group?: boolean;
+  /** a linha já existe (campo vazio no TX2): é para preencher, não inserir */
+  fill?: boolean;
+  /** formato do texto: tag XML ou linha de TX2 */
+  format?: 'xml' | 'tx2';
+  /** uso interno: grupo e nome da tag que falta */
+  parent?: XNode;
+  name?: string;
 }
 
 export interface Finding {
@@ -70,8 +75,10 @@ export interface Finding {
   fix?: Fix;
   /** descrição oficial do campo (documentação do XSD) */
   doc?: string;
-  /** tags que faltam, com a posição no XML exibido */
+  /** tags que faltam, com a posição no arquivo enviado (XML ou TX2) */
   ghosts?: Ghost[];
+  /** para TX2: as mesmas tags no XML montado */
+  xmlGhosts?: Ghost[];
 }
 
 export interface DocSummary {

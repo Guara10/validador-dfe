@@ -1,5 +1,6 @@
 import type { XNode, Finding } from '../types';
-import { Dict, type DNode, type Group, maxOf } from '../dict';
+import { Dict, type DNode, type Group, type Particle, maxOf } from '../dict';
+import type { Ghost } from '../types';
 import { dictPath } from '../xml/parse';
 import { chaveFromIde } from '../rules/nfe';
 
@@ -121,6 +122,8 @@ export interface BuildResult {
   empties: { f: Tx2Field; cands: DNode[] }[];
   problems: Finding[];
   idGenerated: boolean;
+  /** ID do leiaute usado neste TX2 para cada caminho (ex.: .../ICMS51/pRedBC -> N14) */
+  idsByPath: Map<string, string>;
 }
 
 function cmpId(a: Tx2Field, b: Tx2Field) {
@@ -272,7 +275,11 @@ export function buildFromTx2(note: Tx2Note, dict: Dict): BuildResult {
   };
   lineRec(root);
 
-  return { root, ignored, empties, problems, idGenerated };
+  const idsByPath = new Map<string, string>();
+  for (const [, placed] of scopes) for (const p of placed) if (!idsByPath.has(p.cands[0].path)) idsByPath.set(p.cands[0].path, p.f.id);
+  for (const e of empties) if (e.cands.length === 1 && !idsByPath.has(e.cands[0].path)) idsByPath.set(e.cands[0].path, e.f.id);
+
+  return { root, ignored, empties, problems, idGenerated, idsByPath };
 }
 
 /**
@@ -327,4 +334,111 @@ export function makeEmptyLookup(b: BuildResult) {
     const hit = b.empties.find((e) => e.f.tag === name && e.cands.some((c) => c.path === pPath + '/' + name) && (item === undefined || e.f.item === item));
     return hit ? { line: hit.f.line, field: hit.f.field } : undefined;
   };
+}
+
+/* ------------------------------------------------------------------ */
+/* Tag que falta, mostrada como linha de TX2                           */
+/* ------------------------------------------------------------------ */
+
+/** IDs do leiaute (MOC) dos campos que mais faltam, para quando o próprio TX2 não traz o campo. */
+const KNOWN_IDS: [string, string][] = [
+  ['ide/cUF', 'B02'], ['ide/cNF', 'B03'], ['ide/natOp', 'B04'], ['ide/mod', 'B06'], ['ide/serie', 'B07'], ['ide/nNF', 'B08'],
+  ['ide/dhEmi', 'B09'], ['ide/dhSaiEnt', 'B10'], ['ide/tpNF', 'B11'], ['ide/idDest', 'B11a'], ['ide/cMunFG', 'B12'], ['ide/tpImp', 'B21'],
+  ['ide/tpEmis', 'B22'], ['ide/cDV', 'B23'], ['ide/tpAmb', 'B24'], ['ide/finNFe', 'B25'], ['ide/indFinal', 'B25a'], ['ide/indPres', 'B25b'],
+  ['ide/indIntermed', 'B25c'], ['ide/procEmi', 'B26'], ['ide/verProc', 'B27'],
+  ['emit/CNPJ', 'C02'], ['emit/CPF', 'C02a'], ['emit/xNome', 'C03'], ['emit/xFant', 'C04'], ['emit/xLgr', 'C06'], ['emit/nro', 'C07'],
+  ['emit/xCpl', 'C08'], ['emit/xBairro', 'C09'], ['emit/cMun', 'C10'], ['emit/xMun', 'C11'], ['emit/UF', 'C12'], ['emit/CEP', 'C13'],
+  ['emit/cPais', 'C14'], ['emit/xPais', 'C15'], ['emit/fone', 'C16'], ['emit/IE', 'C17'], ['emit/IEST', 'C18'], ['emit/IM', 'C19'], ['emit/CRT', 'C21'],
+  ['dest/CNPJ', 'E02'], ['dest/CPF', 'E03'], ['dest/idEstrangeiro', 'E03a'], ['dest/xNome', 'E04'], ['dest/xLgr', 'E06'], ['dest/nro', 'E07'],
+  ['dest/xCpl', 'E08'], ['dest/xBairro', 'E09'], ['dest/cMun', 'E10'], ['dest/xMun', 'E11'], ['dest/UF', 'E12'], ['dest/CEP', 'E13'],
+  ['dest/cPais', 'E14'], ['dest/xPais', 'E15'], ['dest/fone', 'E16'], ['dest/indIEDest', 'E16a'], ['dest/IE', 'E17'], ['dest/email', 'E19'],
+  ['prod/cProd', 'I02'], ['prod/cEAN', 'I03'], ['prod/xProd', 'I04'], ['prod/NCM', 'I05'], ['prod/CEST', 'I05c'], ['prod/cBenef', 'I05f'],
+  ['prod/EXTIPI', 'I06'], ['prod/CFOP', 'I08'], ['prod/uCom', 'I09'], ['prod/qCom', 'I10'], ['prod/vUnCom', 'I10a'], ['prod/vProd', 'I11'],
+  ['prod/cEANTrib', 'I12'], ['prod/uTrib', 'I13'], ['prod/qTrib', 'I14'], ['prod/vUnTrib', 'I14a'], ['prod/vFrete', 'I15'], ['prod/vSeg', 'I16'],
+  ['prod/vDesc', 'I17'], ['prod/vOutro', 'I17a'], ['prod/indTot', 'I17b'],
+  ['ICMS/orig', 'N11'], ['ICMS/CST', 'N12'], ['ICMS/CSOSN', 'N12a'], ['ICMS/modBC', 'N13'], ['ICMS/pRedBC', 'N14'], ['ICMS/vBC', 'N15'],
+  ['ICMS/pICMS', 'N16'], ['ICMS/vICMSOp', 'N16a'], ['ICMS/pDif', 'N16b'], ['ICMS/vICMSDif', 'N16c'], ['ICMS/vICMS', 'N17'],
+  ['ICMS/vBCFCP', 'N17a'], ['ICMS/pFCP', 'N17b'], ['ICMS/vFCP', 'N17c'], ['ICMS/modBCST', 'N18'], ['ICMS/pMVAST', 'N19'], ['ICMS/pRedBCST', 'N20'],
+  ['ICMS/vBCST', 'N21'], ['ICMS/pICMSST', 'N22'], ['ICMS/vICMSST', 'N23'], ['ICMS/motDesICMS', 'N28'], ['ICMS/vICMSDeson', 'N28a'],
+  ['IPI/cEnq', 'O06'], ['IPI/CST', 'O09'], ['IPI/vBC', 'O10'], ['IPI/pIPI', 'O13'], ['IPI/vIPI', 'O14'],
+  ['PIS/CST', 'Q06'], ['PIS/vBC', 'Q07'], ['PIS/pPIS', 'Q08'], ['PIS/vPIS', 'Q09'],
+  ['COFINS/CST', 'S06'], ['COFINS/vBC', 'S07'], ['COFINS/pCOFINS', 'S08'], ['COFINS/vCOFINS', 'S11'],
+  ['IBSCBS/CST', 'UB13'], ['IBSCBS/cClassTrib', 'UB14'], ['gIBSCBS/vBC', 'UB16'], ['gIBSUF/pIBSUF', 'UB18'],
+  ['gIBSUF/gRed/pRedAliq', 'UB27'], ['gIBSUF/gRed/pAliqEfet', 'UB28'], ['gIBSUF/vIBSUF', 'UB35'], ['gIBSMun/pIBSMun', 'UB37'],
+  ['gIBSMun/gRed/pRedAliq', 'UB46'], ['gIBSMun/gRed/pAliqEfet', 'UB47'], ['gIBSMun/vIBSMun', 'UB54'], ['gIBSCBS/vIBS', 'UB54a'],
+  ['gCBS/pCBS', 'UB56'], ['gCBS/gRed/pRedAliq', 'UB65'], ['gCBS/gRed/pAliqEfet', 'UB66'], ['gCBS/vCBS', 'UB67'],
+  ['gTribRegular/CSTReg', 'UB69'], ['gTribRegular/cClassTribReg', 'UB70'],
+];
+
+function normPath(p: string): string {
+  return p
+    .replace(/\/ICMS\/ICMS\w+\//, '/ICMS/')
+    .replace(/\/IPI\/(IPITrib|IPINT)\//, '/IPI/')
+    .replace(/\/PIS\/PIS\w+\//, '/PIS/')
+    .replace(/\/COFINS\/COFINS\w+\//, '/COFINS/')
+    .replace(/\/emit\/enderEmit\//, '/emit/')
+    .replace(/\/dest\/enderDest\//, '/dest/');
+}
+function idFor(path: string, learned: Map<string, string>): string | undefined {
+  const l = learned.get(path);
+  if (l) return l;
+  // mesmo campo em outro item (det) do mesmo TX2
+  for (const [p, id] of learned) if (normPath(p) === normPath(path)) return id;
+  const n = normPath(path);
+  let best: [string, string] | undefined;
+  for (const kv of KNOWN_IDS) if (n.endsWith('/' + kv[0]) && (!best || kv[0].length > best[0].length)) best = kv;
+  return best?.[1];
+}
+
+/** Campos obrigatórios de um grupo (para mostrar o esqueleto de um grupo que falta). */
+function requiredLeaves(dict: Dict, dn: DNode): DNode[] {
+  // obrigatórios; de uma escolha (xs:choice) do primeiro nível, usa o primeiro ramo (ex.: gIBSCBS)
+  const out: DNode[] = [];
+  const walkP = (p: Particle, top: boolean) => {
+    if ((p as DNode).n !== undefined) {
+      const d = p as DNode;
+      if ((d.min ?? 1) === 0) return;
+      if (d.c?.length) for (const x of d.c) walkP(x, false);
+      else if (d.k === 'e') out.push(d);
+      return;
+    }
+    const g = p as Group;
+    if (g.s) { if ((g.min ?? 1) === 0) return; for (const x of g.s) walkP(x, top); }
+    else if (g.ch?.length) {
+      if ((g.min ?? 1) > 0) walkP(g.ch[0], false);
+      // escolha opcional: só a primeira do grupo (no IBSCBS, gIBSCBS); as demais são situações específicas
+      else if (top && !usedOptionalChoice) { usedOptionalChoice = true; walkP(g.ch[0], true); }
+    }
+  };
+  let usedOptionalChoice = false;
+  for (const p of dn.c ?? []) walkP(p, true);
+  return out;
+}
+
+const maxLine = (n: XNode): number | undefined => {
+  let m = n.children.length ? undefined : n.tx2Line;
+  for (const a of n.attrs) if (a.tx2Line && (m === undefined || a.tx2Line > m)) m = a.tx2Line;
+  for (const c of n.children) { const l = maxLine(c); if (l !== undefined && (m === undefined || l > m)) m = l; }
+  return m;
+};
+
+/** Converte a prévia de XML em prévia de TX2: linha(s) campo_ID=valor depois da linha certa do TX2. */
+export function tx2GhostFrom(g: Ghost, b: BuildResult, dict: Dict): Ghost | undefined {
+  const parent = g.parent, name = g.name;
+  if (!parent || !name) return undefined;
+  const pPath = dictPath(parent);
+  const dn = dict.get(pPath + '/' + name);
+  if (!dn) return undefined;
+  const value = /^<(\w+)>(.*)<\/\1>$/.exec(g.text)?.[2] ?? '…';
+  // campo existe vazio no TX2: é para preencher a própria linha
+  const empty = makeEmptyLookup(b)(parent, name);
+  if (empty) return { afterLine: empty.line, depth: 0, text: `${empty.field}=${value}`, fill: true, format: 'tx2', name };
+  const leaves = dn.c?.length ? requiredLeaves(dict, dn) : [dn];
+  const text = leaves.map((l) => `${l.n}_${idFor(l.path, b.idsByPath) ?? '?'}=${l === dn ? value : '…'}`).join('\n');
+  const order = (n: XNode) => dict.get(dictPath(n))?.o ?? -1;
+  const prev = [...parent.children].reverse().find((c) => order(c) < dn.o);
+  const next = parent.children.find((c) => order(c) > dn.o);
+  const afterLine = (prev && maxLine(prev)) ?? (next?.tx2Line !== undefined ? next.tx2Line - 1 : maxLine(parent));
+  if (afterLine === undefined) return undefined;
+  return { afterLine, depth: 0, text, group: g.group, format: 'tx2', name };
 }

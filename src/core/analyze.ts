@@ -1,6 +1,6 @@
 import type { Analysis, Finding, XNode } from './types';
 import { Dict } from './dict';
-import { parseXml, XmlSyntaxError, child, descendants } from './xml/parse';
+import { parseXml, XmlSyntaxError, child, descendants, select } from './xml/parse';
 import { formatXml } from './xml/format';
 import { translateXsdErrors, sweepTree, type RawXsdError } from './xsd/translate';
 import { runNfeRules, summarize } from './rules/nfe';
@@ -24,59 +24,67 @@ const sortFindings = (f: Finding[]) => f.sort((a, b) => SEV_ORDER[a.sev] - SEV_O
 
 export async function analyze(text: string, eng: Engine): Promise<Analysis[]> {
   if (looksLikeTx2(text)) return analyzeTx2(text, eng);
-  return [await analyzeXml(text, eng)];
+  return analyzeXml(text, eng);
 }
 
-function findNFe(root: XNode): XNode | undefined {
-  if (root.name === 'NFe') return root;
-  return descendants(root, 'NFe')[0];
-}
-
-export async function analyzeXml(text: string, eng: Engine): Promise<Analysis> {
+export async function analyzeXml(text: string, eng: Engine): Promise<Analysis[]> {
   let root: XNode;
   try {
     root = parseXml(text);
   } catch (e) {
     if (e instanceof XmlSyntaxError) {
-      return {
+      return [{
         kind: 'xml', source: text, schemaOk: false, summary: {},
         findings: [{ sev: 'erro', origin: 'estrutura', title: 'XML malformado', message: e.message, line: e.line, fix: { text: 'Corrija a estrutura do arquivo (tags abertas/fechadas, caracteres especiais como & e < precisam ser escapados).' } }],
         fatal: e.message,
-      };
+      }];
     }
     throw e;
   }
   const { text: formatted, byLine } = formatXml(root);
-  const nfe = findNFe(root);
+  const nfes = root.name === 'NFe' ? [root] : descendants(root, 'NFe');
   const entry = eng.schemas.entry[root.name];
-  const findings: Finding[] = [];
-  let schemaOk = true;
+  const common: Finding[] = [];
+  let schemaFindings: Finding[] = [];
   if (!entry) {
-    findings.push({
+    common.push({
       sev: 'erro', origin: 'estrutura',
       title: `Tag raiz <${root.name}> não é de NF-e`,
       message: root.name === 'CTe' || root.name === 'cteProc' ? 'Este arquivo é um CT-e. Por enquanto o validador cobre NF-e/NFC-e.' : root.name === 'NFSe' || root.name === 'DPS' ? 'Este arquivo é uma NFS-e. Por enquanto o validador cobre NF-e/NFC-e.' : 'O validador reconhece <NFe>, <nfeProc> e <enviNFe>.',
       line: 1,
     });
-    return { kind: 'xml', source: formatted, findings, summary: {}, schemaOk: false };
+    return [{ kind: 'xml', source: formatted, findings: common, summary: {}, schemaOk: false }];
   }
-  const ns = root.attrs.find((a) => a.name === 'xmlns')?.value ?? (nfe ? nfe.attrs.find((a) => a.name === 'xmlns')?.value : undefined);
+  const ns = root.attrs.find((a) => a.name === 'xmlns' || a.name.startsWith('xmlns:'))?.value ?? nfes[0]?.attrs.find((a) => a.name === 'xmlns')?.value;
   if (ns !== 'http://www.portalfiscal.inf.br/nfe') {
-    findings.push({ sev: 'erro', origin: 'schema', code: '225', title: 'Namespace da NF-e ausente ou errado', message: `A tag <${root.name}> precisa de xmlns="http://www.portalfiscal.inf.br/nfe"${ns ? ` (está "${ns}")` : ''}. Sem isso nenhuma outra tag é reconhecida.`, line: 2, found: ns ?? '(ausente)', expected: 'http://www.portalfiscal.inf.br/nfe', fix: { text: 'Inclua o atributo na tag raiz.', value: 'xmlns="http://www.portalfiscal.inf.br/nfe"' } });
-    schemaOk = false;
+    common.push({ sev: 'erro', origin: 'schema', code: '225', title: 'Namespace da NF-e ausente ou errado', message: `A tag <${root.name}> precisa de xmlns="http://www.portalfiscal.inf.br/nfe"${ns ? ` (está "${ns}")` : ''}. Sem isso nenhuma outra tag é reconhecida.`, line: 2, found: ns ?? '(ausente)', expected: 'http://www.portalfiscal.inf.br/nfe', fix: { text: 'Inclua o atributo na tag raiz.', value: 'xmlns="http://www.portalfiscal.inf.br/nfe"' } });
   } else {
     const raw = await eng.runner.validate(formatted, entry);
     const tctx = { dict: eng.dict, byLine };
-    const tr = translateXsdErrors(raw, tctx);
-    if (nfe) tr.push(...sweepTree(nfe, tctx, tr));
-    schemaOk = !tr.some((f) => f.sev === 'erro');
-    findings.push(...tr);
+    schemaFindings = translateXsdErrors(raw, tctx);
+    for (const nfe of nfes) schemaFindings.push(...sweepTree(nfe, tctx, schemaFindings));
   }
-  if (nfe) {
-    findings.push(...runNfeRules(nfe, { lineOf: (n) => n?.fmtLine, fieldOf: () => undefined, now: eng.now?.(), dict: eng.dict, autorizada: root.name === 'nfeProc' && !!descendants(root, 'protNFe').length }));
+  const prot = descendants(root, 'protNFe');
+  const autorizada = prot.some((p) => ['100', '150'].includes(select(p, 'infProt/cStat')?.text ?? ''));
+  if (!nfes.length) {
+    return [{ kind: 'xml', source: formatted, findings: sortFindings(dedupe([...common, ...schemaFindings])), summary: {}, schemaOk: !schemaFindings.some((f) => f.sev === 'erro') && !common.length }];
   }
-  pointToGhost(findings, false);
-  return { kind: 'xml', source: formatted, findings: sortFindings(dedupe(findings)), summary: nfe ? summarize(nfe, root) : {}, schemaOk };
+  // uma análise por nota (lote enviNFe pode ter várias); erros de schema vão para a nota onde estão
+  const inNote = (f: Finding, n: XNode) => f.line !== undefined && n.fmtLine !== undefined && f.line >= n.fmtLine && f.line <= (n.fmtEndLine ?? n.fmtLine);
+  return nfes.map((nfe, i) => {
+    const mine = schemaFindings.filter((f) => inNote(f, nfe) || (i === 0 && !nfes.some((n) => inNote(f, n))));
+    const findings: Finding[] = [...common, ...mine];
+    findings.push(...runNfeRules(nfe, { lineOf: (n) => n?.fmtLine, fieldOf: () => undefined, now: eng.now?.(), dict: eng.dict, autorizada }));
+    if (child(nfe, 'Signature') && !autorizada) {
+      findings.push({ sev: 'info', origin: 'estrutura', title: 'XML já assinado', message: 'Qualquer correção feita neste arquivo invalida a assinatura digital. Use o validador para achar o problema, corrija no sistema e gere/assine a nota de novo.', line: child(nfe, 'Signature')!.fmtLine });
+    }
+    pointToGhost(findings, false);
+    return {
+      kind: 'xml' as const, source: formatted, findings: sortFindings(dedupe(findings)),
+      summary: summarize(nfe, root.name === 'nfeProc' ? root : nfe),
+      schemaOk: !findings.some((f) => f.origin === 'schema' && f.sev === 'erro'),
+    };
+  });
 }
 
 export async function analyzeTx2(text: string, eng: Engine): Promise<Analysis[]> {

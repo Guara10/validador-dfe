@@ -28,15 +28,38 @@ function parseDh(s?: string): Date | undefined {
   const d = new Date(s);
   return isNaN(d.getTime()) ? undefined : d;
 }
+/**
+ * Percentual derivado de valores arredondados. Só devolve valor exato quando um percentual inteiro
+ * reproduz os valores do arquivo; nos outros casos devolve "≈" + aproximação (não pode ser inserido sem conferência).
+ */
+function nicePct(raw: number, reproduces: (c: number) => boolean): string {
+  // só percentual inteiro (ex.: 100%) é conclusivo; com casas decimais, vários valores fecham a mesma conta
+  const c = Math.round(raw);
+  if (reproduces(c)) return c.toFixed(2);
+  // precisa de 4 casas: vários percentuais fecham a conta com os valores arredondados; não dá para saber o exato
+  return '≈' + raw.toFixed(4);
+}
+/** prévia de percentual: valor aproximado não pode ser inserido sem conferência */
+function pctGhost(tag: string, v: string, note: string): [string, string, { note?: string }] {
+  if (!v.startsWith('≈')) return [tag, `<${tag}>${v}</${tag}>`, { note }];
+  return [tag, `<${tag}>…</${tag}>`, { note: `${note} Dá aproximadamente ${v.slice(1)}%, mas com os valores arredondados do arquivo mais de um percentual fecha a conta (ex.: 41,18% e 41,1765%): use o percentual exato da legislação ou do cadastro.` }];
+}
+/** escreve o instante d no fuso indicado (ex.: -03:00) */
+function withOffset(d: Date, off: string): string {
+  const mins = (off[0] === '-' ? -1 : 1) * (+off.slice(1, 3) * 60 + +off.slice(4, 6));
+  const t = new Date(d.getTime() + mins * 60000);
+  const p = (x: number) => String(x).padStart(2, '0');
+  return `${t.getUTCFullYear()}-${p(t.getUTCMonth() + 1)}-${p(t.getUTCDate())}T${p(t.getUTCHours())}:${p(t.getUTCMinutes())}:${p(t.getUTCSeconds())}${off}`;
+}
 const fmtData = (d: Date) => d.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
 
+const NUM = /^-?\d+(\.\d+)?$/;
 const num = (n: XNode | undefined): number | undefined => {
-  if (!n || n.text === undefined || n.text.trim() === '') return undefined;
-  const v = Number(n.text);
-  return isNaN(v) ? undefined : v;
+  if (!n || n.text === undefined || !NUM.test(n.text.trim())) return undefined;
+  return Number(n.text);
 };
-/** valor presente mas não numérico (ex.: "1.500,00"): o schema já acusa; as somas que dependem dele são puladas */
-const bad = (n: XNode | undefined) => !!n && n.text !== undefined && n.text.trim() !== '' && isNaN(Number(n.text));
+/** valor presente mas não numérico (ex.: "1.500,00", "1e3"): o schema já acusa; as somas que dependem dele são puladas */
+const bad = (n: XNode | undefined) => !!n && n.text !== undefined && n.text.trim() !== '' && !NUM.test(n.text.trim());
 const r2 = (v: number) => Math.round((v + Number.EPSILON) * 100) / 100;
 const cents = (v: number) => Math.round(v * 100);
 const brl = (v: number) => v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -107,7 +130,7 @@ export function runNfeRules(nfe: XNode, ctx: RuleCtx): Finding[] {
   const at = (n: XNode | undefined) => ({ path: n ? humanPath(n) : undefined, line: ctx.lineOf(n), tx2Field: ctx.fieldOf(n) });
   const ghosts = (parent: XNode | undefined, items: [string, string?, { note?: string; values?: Record<string, string> }?][]) => {
     if (!ctx.dict) return undefined;
-    const gs = items.map(([n, t, extra]) => { const g = ghostFor(ctx.dict!, parent, n, t); return g && extra ? { ...g, ...extra } : g; }).filter((g): g is NonNullable<typeof g> => !!g);
+    const gs = items.map(([n, t, extra]) => { const g = ghostFor(ctx.dict!, parent, n, t, extra?.values); return g && extra ? { ...g, ...extra } : g; }).filter((g): g is NonNullable<typeof g> => !!g);
     return gs.length ? gs : undefined;
   };
   /** valor do item para base de cálculo: vProd − vDesc + vFrete + vSeg + vOutro */
@@ -121,12 +144,14 @@ export function runNfeRules(nfe: XNode, ctx: RuleCtx): Finding[] {
   /** confere valor x esperado; tol em reais */
   /** valores de item que estão com a conta errada -> valor que fecha a conta */
   const corrections = new Map<XNode, number>();
+  /** valor do campo já corrigido, quando uma conta anterior apontou erro nele */
+  const val = (n: XNode | undefined) => (n && corrections.has(n) ? corrections.get(n)! : num(n));
   const findingOf = (n: XNode) => out.find((f) => f.origin === 'calculo' && f.line === ctx.lineOf(n) && f.found === n.text);
   /**
    * Total que não bate com a soma dos itens. Se a diferença some quando os itens com conta errada
    * são corrigidos, o erro está no item: não sugere mexer no total e avisa no card do item.
    */
-  const checkTotal = (o: { node: XNode | undefined; parts: (XNode | undefined)[]; code?: string; title: string; how: string }) => {
+  const checkTotal = (o: { node: XNode | undefined; parts: (XNode | undefined)[]; code?: string; title: string; how: string; missing?: string }) => {
     if (!o.node || o.parts.some(bad)) return;
     const v = num(o.node);
     if (v === undefined) return;
@@ -134,10 +159,19 @@ export function runNfeRules(nfe: XNode, ctx: RuleCtx): Finding[] {
     const fixed = o.parts.reduce((acc, n) => acc + cents(n && corrections.has(n) ? corrections.get(n)! : num(n) ?? 0), 0) / 100;
     if (Math.abs(r2(v - raw)) < 0.005) return;
     if (Math.abs(r2(v - fixed)) < 0.005) {
+      // a SEFAZ soma os itens como estão: a rejeição acontece, mas quem precisa mudar é o item
       for (const n of o.parts) if (n && corrections.has(n)) {
         const f = findingOf(n);
-        if (f && !f.message.includes(o.node.name + ' ')) f.message += ` O total ${o.node.name} da nota já está com o valor certo: corrigindo este campo, a soma dos itens passa a fechar com ele.`;
+        if (!f || f.message.includes(`total ${o.node.name} `)) continue;
+        f.sev = 'erro';
+        if (o.code && !f.code) f.code = o.code;
+        f.message = `A SEFAZ soma os itens como estão e rejeita${o.code ? ` com ${o.code}` : ''} (total ${o.node.name} diferente da soma). O total ${o.node.name} da nota já está com o valor certo: o que precisa ser corrigido é este campo do item. ` + f.message;
       }
+      return;
+    }
+    if (o.missing) {
+      // um item está sem o grupo: somar os outros e sugerir esse total pioraria a nota
+      out.push({ sev: 'erro', origin: 'calculo', code: o.code, title: o.title, message: `${o.how} dá ${brl(raw)}, mas ${o.missing}. Corrija o item antes de mexer no total.`, ...at(o.node), found: o.node.text, fix: { text: 'Gere o grupo que falta no item; depois valide de novo.' } });
       return;
     }
     check({ node: o.node, expected: raw, code: o.code, sev: 'erro', title: o.title, how: o.how });
@@ -164,6 +198,9 @@ export function runNfeRules(nfe: XNode, ctx: RuleCtx): Finding[] {
 
   /* ---------- chave de acesso ---------- */
   const id = attr(inf, 'Id');
+  // no TX2 a chave está na linha do Id_A03; no XML, na linha do <infNFe>
+  const idAttr = inf.attrs.find((a) => a.name === 'Id');
+  const atId = { path: humanPath(inf) + ' / @Id', line: idAttr?.tx2Line ?? ctx.lineOf(inf), tx2Field: idAttr?.tx2Field };
   const calc = chaveFromIde(inf);
   if (id && calc && /^NFe/.test(id)) {
     const chave = id.slice(3);
@@ -174,7 +211,7 @@ export function runNfeRules(nfe: XNode, ctx: RuleCtx): Finding[] {
         sev: 'erro', origin: 'regra', code: '502',
         title: 'Chave de acesso não bate com os dados da nota',
         message: `O atributo Id não corresponde aos campos da nota. Diferem: ${diffs.join(', ')}.`,
-        ...at(inf), found: chave, expected: calc,
+        ...atId, found: chave, expected: calc,
         fix: { text: 'Chave montada a partir dos campos da ide e do emitente. Confira se o campo divergente é que está errado antes de trocar a chave.', value: 'NFe' + calc },
       });
     } else if (chave[43] !== calc[43]) {
@@ -182,7 +219,7 @@ export function runNfeRules(nfe: XNode, ctx: RuleCtx): Finding[] {
         sev: 'erro', origin: 'regra',
         title: 'Dígito verificador da chave incorreto',
         message: `O último dígito da chave deveria ser ${calc[43]} (módulo 11).`,
-        ...at(inf), found: chave, expected: calc,
+        ...atId, found: chave, expected: calc,
         fix: { text: 'Chave com o DV recalculado.', value: 'NFe' + calc },
       });
     }
@@ -199,7 +236,7 @@ export function runNfeRules(nfe: XNode, ctx: RuleCtx): Finding[] {
   /* ---------- prazos de emissão e saída ---------- */
   const dhEmiN = child(ide, 'dhEmi'), dhSaiN = child(ide, 'dhSaiEnt');
   const dEmi = parseDh(dhEmiN?.text), dSai = parseDh(dhSaiN?.text);
-  if (dEmi && dSai && dSai.getTime() < dEmi.getTime() && child(ide, 'mod')?.text !== '65') {
+  if (dEmi && dSai && dSai.getTime() < dEmi.getTime() && child(ide, 'mod')?.text !== '65' && child(ide, 'tpNF')?.text === '1') {
     out.push({
       sev: 'erro', origin: 'regra', code: '506',
       title: 'Data de saída/entrada anterior à emissão',
@@ -212,10 +249,11 @@ export function runNfeRules(nfe: XNode, ctx: RuleCtx): Finding[] {
     const now = ctx.now ?? new Date();
     const dias = (now.getTime() - dEmi.getTime()) / 86400000;
     if (dias > 30) {
+      const assinado = !!child(nfe, 'Signature');
       out.push({
-        sev: 'erro', origin: 'regra', code: '228',
+        sev: assinado ? 'aviso' : 'erro', origin: 'regra', code: '228',
         title: 'Data de emissão muito atrasada',
-        message: `dhEmi é de ${fmtData(dEmi)}, ${Math.floor(dias)} dias antes de hoje (${fmtData(now)}). A SEFAZ rejeita emissão com mais de 30 dias de atraso (o limite pode ser menor em algumas UFs). Para operação antiga, a nota sai com a data de hoje e a data real da operação vai nas informações complementares, conforme orientação do contador.`,
+        message: `${assinado ? 'O XML está assinado e sem protocolo: se esta nota já foi autorizada, ignore este aviso. Se ainda vai ser transmitida: ' : ''}dhEmi é de ${fmtData(dEmi)}, ${Math.floor(dias)} dias antes de hoje (${fmtData(now)}). A SEFAZ rejeita emissão com mais de 30 dias de atraso (o limite pode ser menor em algumas UFs). Para operação antiga, a nota sai com a data de hoje e a data real da operação vai nas informações complementares, conforme orientação do contador.`,
         ...at(dhEmiN), found: dhEmiN!.text,
         fix: { text: 'Corrija dhEmi (e dhSaiEnt) para a data/hora do envio. Mudar o mês da emissão muda a chave de acesso (AAMM) e o cDV: gere a nota de novo pelo sistema ou recalcule a chave.' },
       });
@@ -232,22 +270,27 @@ export function runNfeRules(nfe: XNode, ctx: RuleCtx): Finding[] {
 
   /* ---------- fuso horário ---------- */
   const ufEmit = child(child(emit, 'enderEmit'), 'UF')?.text ?? UF_COD[child(ide, 'cUF')?.text ?? ''];
+  const noronha = child(ide, 'cMunFG')?.text === '2605459';
   for (const tag of ['dhEmi', 'dhSaiEnt']) {
     const n = child(ide, tag);
     const m = /([+-]\d{2}:\d{2})$/.exec(n?.text ?? '');
-    if (!n || !m || !ufEmit) continue;
-    const allowed = FUSO[ufEmit] ?? ['-03:00'];
-    if (!allowed.includes(m[1])) {
-      const hint = m[1] === '-02:00' ? ' O Brasil não tem horário de verão desde 2019; -02:00 só vale para Fernando de Noronha.' : '';
-      out.push({
-        sev: 'aviso', origin: 'regra',
-        title: `Fuso horário de ${tag} incomum para ${ufEmit}`,
-        message: `O fuso ${m[1]} não é o usado em ${ufEmit} (${allowed.join(' ou ')}).${hint} Com o fuso adiantado, a SEFAZ pode rejeitar por data de emissão posterior ao recebimento (703), principalmente se a nota for transmitida logo após gerada.`,
-        code: tag === 'dhEmi' ? '703' : undefined,
-        ...at(n), found: m[1], expected: allowed[0],
-        fix: { text: 'Corrija o fuso na geração (geralmente configuração de horário de verão do servidor ou da rotina que monta a data).', value: n.text!.replace(/[+-]\d{2}:\d{2}$/, allowed[0]) },
-      });
-    }
+    const d = parseDh(n?.text);
+    if (!n || !m || !d || !ufEmit) continue;
+    const allowed = noronha ? ['-02:00'] : FUSO[ufEmit] ?? ['-03:00'];
+    if (allowed.includes(m[1])) continue;
+    const off = (o: string) => (o[0] === '-' ? -1 : 1) * (+o.slice(1, 3) * 60 + +o.slice(4, 6));
+    const ahead = off(m[1]) > off(allowed[0]); // ex.: -02:00 num lugar de -03:00
+    const mesmoInstante = withOffset(d, allowed[0]);
+    const soFuso = n.text!.replace(/[+-]\d{2}:\d{2}$/, allowed[0]);
+    const hint = m[1] === '-02:00' ? ' O Brasil não tem horário de verão desde 2019; -02:00 só vale para Fernando de Noronha.' : '';
+    out.push({
+      sev: 'aviso', origin: 'regra',
+      title: `Fuso horário de ${tag} incomum para ${ufEmit}`,
+      message: `O fuso ${m[1]} não é o usado em ${ufEmit} (${allowed.join(' ou ')}).${hint} O caso mais comum é o servidor com horário de verão desatualizado: o instante está certo e a hora local real é ${mesmoInstante.slice(11, 19)} (valor sugerido). Se a hora ${n.text!.slice(11, 19)} é a hora local certa e só o fuso está errado, o valor é ${soFuso}${ahead ? ', mas aí o instante enviado hoje está 1 hora no futuro e a SEFAZ pode rejeitar com 703 se a nota for transmitida logo' : ''}.`,
+      code: tag === 'dhEmi' && ahead ? '703' : undefined,
+      ...at(n), found: n.text, expected: `fuso ${allowed[0]}`,
+      fix: { text: 'Mesmo instante, escrito no fuso da UF. Corrija também a configuração de fuso/horário de verão do servidor ou da rotina que monta a data.', value: mesmoInstante },
+    });
   }
 
   /* ---------- CFOP x tipo/destino ---------- */
@@ -267,9 +310,11 @@ export function runNfeRules(nfe: XNode, ctx: RuleCtx): Finding[] {
     }
   }
   const ufDest = select(dest, 'enderDest/UF')?.text;
-  if (ufEmit && ufDest && idDest) {
-    if (idDest === '1' && ufDest !== ufEmit && ufDest !== 'EX') out.push({ sev: 'erro', origin: 'regra', title: 'Operação marcada como interna para outra UF', message: `idDest=1 (interna), mas o emitente é de ${ufEmit} e o destinatário de ${ufDest}.`, ...at(child(ide, 'idDest')), found: idDest, expected: '2', fix: { text: 'Para destinatário de outra UF, idDest deve ser 2 (interestadual).', value: '2' } });
-    if (idDest === '2' && ufDest === ufEmit) out.push({ sev: 'erro', origin: 'regra', title: 'Operação marcada como interestadual na mesma UF', message: `idDest=2 (interestadual), mas emitente e destinatário são de ${ufEmit}.`, ...at(child(ide, 'idDest')), found: idDest, expected: '1', fix: { text: 'Para destinatário da mesma UF, idDest deve ser 1 (interna) — a menos que a entrega seja em outra UF.', value: '1' } });
+  const entregaOuRetirada = !!child(inf, 'entrega') || !!child(inf, 'retirada');
+  const mesmoCnpj = !!child(dest, 'CNPJ')?.text && child(dest, 'CNPJ')?.text === child(emit, 'CNPJ')?.text;
+  if (ufEmit && ufDest && idDest && !entregaOuRetirada) {
+    if (idDest === '1' && ufDest !== ufEmit && ufDest !== 'EX' && child(ide, 'indFinal')?.text === '0') out.push({ sev: 'erro', origin: 'regra', code: '773', title: 'Operação marcada como interna para outra UF', message: `idDest=1 (interna), mas o emitente é de ${ufEmit} e o destinatário de ${ufDest}.`, ...at(child(ide, 'idDest')), found: idDest, expected: '2', fix: { text: 'Para destinatário de outra UF, idDest deve ser 2 (interestadual).', value: '2' } });
+    if (idDest === '2' && ufDest === ufEmit && !mesmoCnpj) out.push({ sev: 'erro', origin: 'regra', code: '772', title: 'Operação marcada como interestadual na mesma UF', message: `idDest=2 (interestadual), mas emitente e destinatário são de ${ufEmit}.`, ...at(child(ide, 'idDest')), found: idDest, expected: '1', fix: { text: 'Para destinatário da mesma UF, idDest deve ser 1 (interna) — a menos que a entrega seja em outra UF.', value: '1' } });
   }
 
   /* ---------- não contribuinte ---------- */
@@ -278,16 +323,23 @@ export function runNfeRules(nfe: XNode, ctx: RuleCtx): Finding[] {
   const mod = child(ide, 'mod')?.text;
   if (indIEDest === '9') {
     const indFinal = child(ide, 'indFinal');
-    if (mod === '55' && indFinal?.text === '0') {
+    if (mod === '55' && indFinal?.text === '0' && child(ide, 'tpNF')?.text === '1' && child(ide, 'idDest')?.text !== '3') {
       out.push({ sev: 'erro', origin: 'regra', code: '696', title: 'Não contribuinte sem indicação de consumidor final', message: 'Destinatário marcado como não contribuinte (indIEDest=9), mas indFinal=0. Operação com não contribuinte deve ser com consumidor final.', ...at(indFinal), found: '0', expected: '1', fix: { text: 'Se o destinatário é mesmo não contribuinte, indFinal deve ser 1. Se ele tem IE, o erro está no indIEDest do cadastro.', value: '1' } });
     }
     const permitidos = ['00', '20', '40', '41', '60'];
     const excecaoCfop = ['5123', '5922', '6123', '6922'];
+    const excecao = (cst: string, cfop: string, det: XNode) =>
+      excecaoCfop.includes(cfop) || !!select(det, 'prod/veicProd') ||
+      (cst === '50' && /^[56]9/.test(cfop)) ||
+      (cst === '51' && ['5906', '5907', '6906', '6907'].includes(cfop)) ||
+      (cst === '10' && idDest === '1') ||
+      (finNFe === '4' && ['50', '51'].includes(cst));
     for (const det of dets) {
+      if (tpNF !== '1') break;
       const g = icmsGroup(det);
       const cst = child(g, 'CST');
       const cfop = select(det, 'prod/CFOP')?.text ?? '';
-      if (cst?.text && !permitidos.includes(cst.text) && finNFe !== '4' && !excecaoCfop.includes(cfop)) {
+      if (cst?.text && !permitidos.includes(cst.text) && !excecao(cst.text, cfop, det)) {
         out.push({
           sev: 'aviso', origin: 'regra', code: '508',
           title: `CST ${cst.text} com destinatário não contribuinte (${itemLabel(det)})`,
@@ -307,15 +359,18 @@ export function runNfeRules(nfe: XNode, ctx: RuleCtx): Finding[] {
     const parts = (d: XNode) => {
       const vi = itemValue(d);
       if (vi === undefined) return undefined;
-      const icms = num(child(icmsGroup(d), 'vICMS')) ?? 0;
-      const pis = num(child(select(d, 'imposto/PIS')?.children[0], 'vPIS')) ?? 0;
-      const cof = num(child(select(d, 'imposto/COFINS')?.children[0], 'vCOFINS')) ?? 0;
+      const g = icmsGroup(d);
+      const z = (n?: XNode) => num(n) ?? 0;
+      // ICMS e parcelas que também saem da base do IBS/CBS (NT 2025.002): FCP, ICMS monofásico, difal, ISSQN
+      const icms = z(child(g, 'vICMS')) + z(child(g, 'vFCP')) + z(child(g, 'vICMSMono')) + z(select(d, 'imposto/ICMSUFDest/vICMSUFDest')) + z(select(d, 'imposto/ICMSUFDest/vFCPUFDest')) + z(select(d, 'imposto/ISSQN/vISSQN'));
+      const pis = z(child(select(d, 'imposto/PIS')?.children[0], 'vPIS'));
+      const cof = z(child(select(d, 'imposto/COFINS')?.children[0], 'vCOFINS'));
       return { vi, icms, pis, cof };
     };
     const formulas: [string, (x: NonNullable<ReturnType<typeof parts>>) => number][] = [
       ['valor do item', (x) => x.vi],
-      ['valor do item − vICMS', (x) => x.vi - x.icms],
-      ['valor do item − vICMS − vPIS − vCOFINS', (x) => x.vi - x.icms - x.pis - x.cof],
+      ['valor do item − ICMS (com FCP, difal e monofásico, quando houver)', (x) => x.vi - x.icms],
+      ['valor do item − ICMS (com FCP, difal e monofásico) − PIS − COFINS', (x) => x.vi - x.icms - x.pis - x.cof],
     ];
     const refs = dets.filter((d) => d !== det && num(select(d, 'imposto/IBSCBS/gIBSCBS/vBC')) !== undefined);
     const me = parts(det);
@@ -331,11 +386,11 @@ export function runNfeRules(nfe: XNode, ctx: RuleCtx): Finding[] {
     const lbl = itemLabel(det);
     const prod = child(det, 'prod');
     const q = num(child(prod, 'qCom')), vu = num(child(prod, 'vUnCom'));
-    if (q !== undefined && vu !== undefined) {
+    if (q !== undefined && vu !== undefined && q > 0 && vu > 0 && (finNFe ?? '1') === '1') {
       check({ node: child(prod, 'vProd'), expected: q * vu, tol: 0.01, code: '629', title: `vProd diferente de qCom × vUnCom (${lbl})`, how: `${q} × ${vu} = ${fmt2(r2(q * vu))}` });
     }
     const qt = num(child(prod, 'qTrib')), vut = num(child(prod, 'vUnTrib'));
-    if (qt !== undefined && vut !== undefined && num(child(prod, 'vProd')) !== undefined) {
+    if (qt !== undefined && vut !== undefined && qt > 0 && vut > 0 && (finNFe ?? '1') === '1' && num(child(prod, 'vProd')) !== undefined) {
       const e = qt * vut;
       if (Math.abs(r2(e) - num(child(prod, 'vProd'))!) > 0.01) {
         out.push({ sev: 'aviso', origin: 'calculo', title: `qTrib × vUnTrib não bate com vProd (${lbl})`, message: `${qt} × ${vut} = ${fmt2(r2(e))}, mas vProd é ${child(prod, 'vProd')!.text}. Algumas UFs rejeitam essa diferença.`, ...at(child(prod, 'vUnTrib')), found: child(prod, 'vUnTrib')!.text, fix: { text: 'Confira unidade e quantidade tributável (uTrib/qTrib) em relação à comercial.' } });
@@ -347,9 +402,10 @@ export function runNfeRules(nfe: XNode, ctx: RuleCtx): Finding[] {
     if (g) {
       const vBC = num(child(g, 'vBC')), p = num(child(g, 'pICMS'));
       if (g.name === 'ICMS51') {
-        const vOp = num(child(g, 'vICMSOp')), pDif = num(child(g, 'pDif')), vDif = num(child(g, 'vICMSDif'));
         if (vBC !== undefined && p !== undefined) check({ node: child(g, 'vICMSOp'), expected: (vBC * p) / 100, tol: 0.01, sev: 'aviso', title: `vICMSOp diferente de vBC × pICMS (${lbl})`, how: `${fmt2(vBC)} × ${pct(p)} = ${fmt2(r2((vBC * p) / 100))}` });
+        const vOp = val(child(g, 'vICMSOp')), pDif = num(child(g, 'pDif'));
         if (vOp !== undefined && pDif !== undefined) check({ node: child(g, 'vICMSDif'), expected: (vOp * pDif) / 100, tol: 0.01, sev: 'aviso', title: `vICMSDif diferente de vICMSOp × pDif (${lbl})`, how: `${fmt2(vOp)} × ${pct(pDif)} = ${fmt2(r2((vOp * pDif) / 100))}` });
+        const vDif = val(child(g, 'vICMSDif'));
         if (vOp !== undefined && vDif !== undefined) check({ node: child(g, 'vICMS'), expected: vOp - vDif, tol: 0.01, sev: 'aviso', title: `vICMS diferente de vICMSOp − vICMSDif (${lbl})`, how: `${fmt2(vOp)} − ${fmt2(vDif)} = ${fmt2(r2(vOp - vDif))}` });
         const faltam = ['pRedBC', 'pDif'].filter((t) => !child(g, t));
         if (faltam.length) {
@@ -359,8 +415,8 @@ export function runNfeRules(nfe: XNode, ctx: RuleCtx): Finding[] {
           const aLine = ctx.lineOf(anchor);
           const nome = (tag: string, id: string) => (isTx2 ? `${tag}_${id}` : `<${tag}>`);
           const passos: string[] = [];
-          if (faltam.includes('pRedBC')) passos.push(`${nome('pRedBC', 'N14')} com 0.00 (quando não há redução de base), logo depois de ${nome(anchor?.name ?? 'CST', anchor?.name === 'modBC' ? 'N13' : 'N12')}${aLine ? ` (linha ${aLine})` : ''}`);
-          if (faltam.includes('pDif')) passos.push(`${nome('pDif', 'N16b')} com o percentual do diferimento previsto na legislação (100.0000 quando o diferimento é total)${child(g, 'vICMSOp') ? `, depois de ${nome('vICMSOp', 'N16a')}` : ''}`);
+          if (faltam.includes('pRedBC')) passos.push(`${nome('pRedBC', 'N14')} (percentual de redução da base; 0.00 quando não há redução), logo depois de ${nome(anchor?.name ?? 'CST', anchor?.name === 'modBC' ? 'N13' : 'N12')}${aLine ? ` (linha ${aLine})` : ''}`);
+          if (faltam.includes('pDif')) passos.push(`${nome('pDif', 'N16b')} (percentual do diferimento previsto na legislação; 100.00 quando o diferimento é total)${child(g, 'vICMSOp') ? `, depois de ${nome('vICMSOp', 'N16a')}` : ''}`);
           out.push({
             sev: 'aviso', origin: 'regra', code: '929',
             title: `CST 51 sem ${faltam.join(' e ')} (${lbl})`,
@@ -369,23 +425,31 @@ export function runNfeRules(nfe: XNode, ctx: RuleCtx): Finding[] {
             ghosts: ghosts(g, faltam.map((t) => {
               if (t === 'pRedBC') {
                 const base = itemValue(det);
+                if (vBC !== undefined && base && vBC > base + 0.005) return [t, '<pRedBC>0.00</pRedBC>', { note: `pRedBC = 0.00: a vBC (${fmt2(vBC)}) é maior que o valor do item (${fmt2(base)}), o que acontece quando IPI ou outras parcelas entram na base; não há redução.` }];
                 if (vBC !== undefined && base) {
                   const red = (1 - vBC / base) * 100;
                   if (Math.abs(red) < 0.005) return [t, '<pRedBC>0.00</pRedBC>', { note: `pRedBC = 0.00: a vBC (${fmt2(vBC)}) é igual ao valor do item, então não há redução de base.` }];
-                  if (red > 0 && red < 100) return [t, `<pRedBC>${red.toFixed(4)}</pRedBC>`, { note: `pRedBC = (1 − vBC ÷ valor do item) × 100 = (1 − ${fmt2(vBC)} ÷ ${fmt2(base)}) × 100. Confira com o percentual de redução do cadastro.` }];
+                  if (red > 0 && red < 100) return pctGhost('pRedBC', nicePct(red, (c) => r2(base * (1 - c / 100)) === r2(vBC)), `pRedBC = (1 − vBC ÷ valor do item) × 100 = (1 − ${fmt2(vBC)} ÷ ${fmt2(base)}) × 100. Confira com o percentual de redução do cadastro.`);
                 }
                 return [t, '<pRedBC>0.00</pRedBC>', { note: 'pRedBC = 0.00: o grupo não tem vBC, então foi considerado sem redução de base. Confirme no cadastro de tributação.' }];
               }
               const vOp = num(child(g, 'vICMSOp')), vDif = num(child(g, 'vICMSDif')), vI = num(child(g, 'vICMS'));
-              if (vOp && vDif !== undefined) return [t, `<pDif>${((vDif / vOp) * 100).toFixed(4)}</pDif>`, { note: `pDif = vICMSDif ÷ vICMSOp × 100 = ${fmt2(vDif)} ÷ ${fmt2(vOp)} × 100.` }];
-              if (vOp && vI !== undefined) return [t, `<pDif>${(((vOp - vI) / vOp) * 100).toFixed(4)}</pDif>`, { note: `pDif = (vICMSOp − vICMS) ÷ vICMSOp × 100 = (${fmt2(vOp)} − ${fmt2(vI)}) ÷ ${fmt2(vOp)} × 100.` }];
+              if (vOp && vDif !== undefined) return pctGhost('pDif', nicePct((vDif / vOp) * 100, (c) => r2((vOp * c) / 100) === r2(vDif)), `pDif = vICMSDif ÷ vICMSOp × 100 = ${fmt2(vDif)} ÷ ${fmt2(vOp)} × 100.`);
+              if (vOp && vI !== undefined) return pctGhost('pDif', nicePct(((vOp - vI) / vOp) * 100, (c) => r2(vOp - r2((vOp * c) / 100)) === r2(vI)), `pDif = (vICMSOp − vICMS) ÷ vICMSOp × 100 = (${fmt2(vOp)} − ${fmt2(vI)}) ÷ ${fmt2(vOp)} × 100.`);
               return [t, '<pDif>…</pDif>', { note: 'pDif não sai de conta: o grupo não tem vICMSOp nem vICMSDif. Use o percentual do diferimento da legislação (100.0000 quando é total).' }];
             }) as [string, string, { note?: string }][]),
-            fix: { text: `Inclua ${passos.join('; e ')}.` },
+            fix: { text: `Inclua ${passos.join('; e ')}. Os valores que saem de conta com o próprio arquivo aparecem no trecho abaixo.` },
           });
         }
       } else if (vBC !== undefined && p !== undefined && child(g, 'vICMS')) {
         check({ node: child(g, 'vICMS'), expected: (vBC * p) / 100, tol: 0.01, sev: 'aviso', title: `vICMS diferente de vBC × pICMS (${lbl})`, how: `${fmt2(vBC)} × ${pct(p)} = ${fmt2(r2((vBC * p) / 100))}`, extra: 'Algumas SEFAZ rejeitam; outras aceitam e o erro aparece na apuração.' });
+      }
+      if (['ICMS10', 'ICMS70'].includes(g.name)) {
+        const bST = num(child(g, 'vBCST')), pST = num(child(g, 'pICMSST')), proprio = val(child(g, 'vICMS')) ?? 0;
+        if (bST !== undefined && pST !== undefined && child(g, 'vICMSST')) {
+          const e = Math.max(0, (bST * pST) / 100 - proprio);
+          check({ node: child(g, 'vICMSST'), expected: e, tol: 0.01, sev: 'aviso', title: `vICMSST diferente de vBCST × pICMSST − vICMS (${lbl})`, how: `${fmt2(bST)} × ${pct(pST)} − ${fmt2(proprio)} = ${fmt2(r2(e))}` });
+        }
       }
       const pF = num(child(g, 'pFCP')), bF = num(child(g, 'vBCFCP')) ?? vBC;
       if (pF !== undefined && bF !== undefined) check({ node: child(g, 'vFCP'), expected: (bF * pF) / 100, tol: 0.01, sev: 'aviso', title: `vFCP diferente da base × pFCP (${lbl})`, how: `${fmt2(bF)} × ${pct(pF)} = ${fmt2(r2((bF * pF) / 100))}` });
@@ -409,11 +473,11 @@ export function runNfeRules(nfe: XNode, ctx: RuleCtx): Finding[] {
     const ibs = select(det, 'imposto/IBSCBS');
     if (anyIBS && !ibs) {
       out.push({
-        sev: 'erro', origin: 'regra', code: '1080',
+        sev: 'aviso', origin: 'regra',
         title: `${lbl[0].toUpperCase() + lbl.slice(1)} sem grupo IBSCBS`,
-        message: 'Outros itens da nota têm o grupo IBS/CBS e este não. Os totais de IBS/CBS deixam de bater com a soma dos itens, e a SEFAZ rejeita.',
+        message: 'Outros itens da nota têm o grupo IBS/CBS e este não. A regra que exige o grupo em todos os itens (rejeição 1115) está prevista na NT, mas hoje está suspensa em produção; quando entrar em vigor, a nota será rejeitada. Se os totais de IBS/CBS foram somados com este item, eles também não vão fechar.',
         ...at(det),
-        ghosts: ghosts(child(det, 'imposto'), [['IBSCBS', '<IBSCBS> CST, cClassTrib, gIBSCBS… </IBSCBS>', ibsBaseFor(det)]]),
+        ghosts: ghosts(child(det, 'imposto'), [['IBSCBS', undefined, ibsBaseFor(det)]]),
         fix: { text: 'Gere o grupo IBSCBS também neste item (no TX2, o bloco CST_UB13 ... vCBS_UB67 antes do SALVARITEM). Geralmente é falha na geração ou cadastro de tributação do produto incompleto.' },
       });
     }
@@ -439,7 +503,7 @@ export function runNfeRules(nfe: XNode, ctx: RuleCtx): Finding[] {
       const uf = esfera('gIBSUF', 'pIBSUF', 'vIBSUF', 'IBS UF');
       const mun = esfera('gIBSMun', 'pIBSMun', 'vIBSMun', 'IBS Município');
       const cbs = esfera('gCBS', 'pCBS', 'vCBS', 'CBS');
-      const vU = num(child(uf, 'vIBSUF')), vM = num(child(mun, 'vIBSMun'));
+      const vU = val(child(uf, 'vIBSUF')), vM = val(child(mun, 'vIBSMun'));
       if (vU !== undefined && vM !== undefined) check({ node: child(gI, 'vIBS'), expected: vU + vM, sev: 'erro', title: `vIBS diferente de vIBSUF + vIBSMun (${lbl})`, how: `${fmt2(vU)} + ${fmt2(vM)} = ${fmt2(r2(vU + vM))}` });
       // reduções diferentes entre esferas (caso típico: município zerado porque a alíquota municipal é 0)
       const reds = [['UF', uf], ['Município', mun], ['CBS', cbs]].map(([n, gr]) => [n, num(select(gr as XNode, 'gRed/pRedAliq'))] as const).filter(([, v]) => v !== undefined);
@@ -463,20 +527,25 @@ export function runNfeRules(nfe: XNode, ctx: RuleCtx): Finding[] {
 
   /* ---------- totais ICMSTot ---------- */
   if (tot) {
-    const sum = (fn: (d: XNode) => XNode | undefined, filter?: (d: XNode) => boolean) => dets.filter(filter ?? (() => true)).map(fn);
+    // NF-e conjugada (produtos + serviços): os totais do ICMSTot somam só os itens sujeitos ao ICMS
+    const conjugada = dets.some((d) => select(d, 'imposto/ISSQN'));
+    const icmsDets = conjugada ? dets.filter((d) => select(d, 'imposto/ICMS')) : dets;
+    const sum = (fn: (d: XNode) => XNode | undefined, filter?: (d: XNode) => boolean) => icmsDets.filter(filter ?? (() => true)).map(fn);
     const indTot1 = (d: XNode) => select(d, 'prod/indTot')?.text !== '0';
-    const T = (tag: string, parts: (XNode | undefined)[], how: string, code?: string) =>
-      checkTotal({ node: child(tot, tag), parts, code, title: `Total ${tag} diferente da soma dos itens`, how });
+    const semICMS = icmsDets.filter((d) => !icmsGroup(d) && !select(d, 'imposto/ISSQN'));
+    const faltaICMS = semICMS.length ? `${semICMS.map(itemLabel).join(', ')} ${semICMS.length > 1 ? 'estão' : 'está'} sem o grupo de ICMS` : undefined;
+    const T = (tag: string, parts: (XNode | undefined)[], how: string, code?: string, icmsDep = false) =>
+      checkTotal({ node: child(tot, tag), parts, code, title: `Total ${tag} diferente da soma dos itens`, how, missing: icmsDep ? faltaICMS : undefined });
     const g = (path: string) => (d: XNode) => select(d, path);
     const ic = (tag: string) => (d: XNode) => child(icmsGroup(d), tag);
-    T('vBC', sum(ic('vBC')), 'Soma de vBC do ICMS dos itens', '531');
-    T('vICMS', sum(ic('vICMS')), 'Soma de vICMS dos itens', '532');
-    T('vICMSDeson', sum(ic('vICMSDeson')), 'Soma de vICMSDeson dos itens');
-    T('vFCP', sum(ic('vFCP')), 'Soma de vFCP dos itens');
-    T('vBCST', sum(ic('vBCST')), 'Soma de vBCST dos itens', '533');
-    T('vST', sum(ic('vICMSST')), 'Soma de vICMSST dos itens', '534');
-    T('vFCPST', sum(ic('vFCPST')), 'Soma de vFCPST dos itens');
-    T('vFCPSTRet', sum(ic('vFCPSTRet')), 'Soma de vFCPSTRet dos itens');
+    T('vBC', sum(ic('vBC')), 'Soma de vBC do ICMS dos itens', '531', true);
+    T('vICMS', sum(ic('vICMS')), 'Soma de vICMS dos itens', '532', true);
+    T('vICMSDeson', sum(ic('vICMSDeson')), 'Soma de vICMSDeson dos itens', undefined, true);
+    T('vFCP', sum(ic('vFCP')), 'Soma de vFCP dos itens', undefined, true);
+    T('vBCST', sum(ic('vBCST')), 'Soma de vBCST dos itens', '533', true);
+    T('vST', sum(ic('vICMSST')), 'Soma de vICMSST dos itens', '534', true);
+    T('vFCPST', sum(ic('vFCPST')), 'Soma de vFCPST dos itens', undefined, true);
+    T('vFCPSTRet', sum(ic('vFCPSTRet')), 'Soma de vFCPSTRet dos itens', undefined, true);
     T('vProd', sum(g('prod/vProd'), indTot1), 'Soma de vProd dos itens que compõem o total (indTot=1)', '564');
     T('vFrete', sum(g('prod/vFrete')), 'Soma de vFrete dos itens');
     T('vSeg', sum(g('prod/vSeg')), 'Soma de vSeg dos itens');
@@ -489,35 +558,43 @@ export function runNfeRules(nfe: XNode, ctx: RuleCtx): Finding[] {
     T('vCOFINS', sum((d) => child(select(d, 'imposto/COFINS')?.children[0], 'vCOFINS')), 'Soma de vCOFINS dos itens');
 
     // vNF
-    if (!select(inf, 'total/ISSQNtot') && !tot.children.some(bad)) {
-      const t = (tag: string) => num(child(tot, tag)) ?? 0;
+    // fora da regra: importação (CFOP 3xxx soma outros tributos) e faturamento direto de veículo novo
+    const importacao = dets.some((d) => /^3/.test(select(d, 'prod/CFOP')?.text ?? ''));
+    const fatDireto = dets.some((d) => select(d, 'prod/veicProd/tpOp')?.text === '2');
+    if (!select(inf, 'total/ISSQNtot') && !tot.children.some(bad) && !importacao && !fatDireto) {
+      const t = (tag: string) => val(child(tot, tag)) ?? 0;
       const deson = dets.reduce((s, d) => s + (child(icmsGroup(d), 'indDeduzDeson')?.text === '1' ? cents(num(child(icmsGroup(d), 'vICMSDeson')) ?? 0) : 0), 0) / 100;
       const e = t('vProd') - t('vDesc') - deson + t('vST') + t('vFCPST') + t('vFrete') + t('vSeg') + t('vOutro') + t('vII') + t('vIPI') + t('vIPIDevol');
-      check({
-        node: child(tot, 'vNF'), expected: e, sev: 'erro', code: '610',
-        title: 'Total da nota (vNF) não fecha com os totais',
-        how: `vProd − vDesc${deson ? ' − vICMSDeson' : ''} + vST + vFCPST + vFrete + vSeg + vOutro + vII + vIPI + vIPIDevol = ${fmt2(r2(e))}`,
-      });
+      const vNFn = child(tot, 'vNF'), vNFv = num(vNFn);
+      const how = `vProd − vDesc${deson ? ' − vICMSDeson' : ''} + vST + vFCPST + vFrete + vSeg + vOutro + vII + vIPI + vIPIDevol = ${fmt2(r2(e))}`;
+      // a SEFAZ tolera diferença de até R$ 0,50 no vNF
+      if (vNFv !== undefined && Math.abs(r2(vNFv - e)) > 0.005 && Math.abs(r2(vNFv - e)) <= 0.5) {
+        check({ node: vNFn, expected: e, sev: 'aviso', title: 'Total da nota (vNF) com diferença de centavos', how, extra: 'A SEFAZ aceita diferença de até R$ 0,50 no total da nota, então isso não rejeita; vale corrigir o arredondamento na geração.' });
+      } else {
+        check({ node: vNFn, expected: e, sev: 'erro', code: '610', title: 'Total da nota (vNF) não fecha com os totais', how });
+      }
     }
   }
 
   /* ---------- totais IBS/CBS ---------- */
   const tIBS = select(inf, 'total/IBSCBSTot');
   if (tIBS && anyIBS) {
+    const semIBS = dets.filter((d) => !select(d, 'imposto/IBSCBS'));
+    const faltaIBS = semIBS.length ? `${semIBS.map(itemLabel).join(', ')} ${semIBS.length > 1 ? 'estão' : 'está'} sem o grupo IBSCBS` : undefined;
     const T = (tPath: string, iPath: string, code?: string) =>
-      checkTotal({ node: select(tIBS, tPath), parts: dets.map((d) => select(d, 'imposto/IBSCBS/gIBSCBS/' + iPath)), code, title: `Total ${tPath.split('/').pop()} (IBS/CBS) diferente da soma dos itens`, how: `Soma de ${iPath.split('/').pop()} dos itens` });
-    T('vBCIBSCBS', 'vBC');
+      checkTotal({ node: select(tIBS, tPath), parts: dets.map((d) => select(d, 'imposto/IBSCBS/gIBSCBS/' + iPath)), code, title: `Total ${tPath.split('/').pop()} (IBS/CBS) diferente da soma dos itens`, how: `Soma de ${iPath.split('/').pop()} dos itens`, missing: faltaIBS });
+    T('vBCIBSCBS', 'vBC', '1076');
     T('gIBS/gIBSUF/vIBSUF', 'gIBSUF/vIBSUF', '1080');
-    T('gIBS/gIBSMun/vIBSMun', 'gIBSMun/vIBSMun');
-    T('gIBS/vIBS', 'vIBS');
-    T('gCBS/vCBS', 'gCBS/vCBS');
+    T('gIBS/gIBSMun/vIBSMun', 'gIBSMun/vIBSMun', '1084');
+    T('gIBS/vIBS', 'vIBS', '1085');
+    T('gCBS/vCBS', 'gCBS/vCBS', '1091');
     T('gIBS/gIBSUF/vDif', 'gIBSUF/gDif/vDif');
     T('gIBS/gIBSMun/vDif', 'gIBSMun/gDif/vDif');
     T('gCBS/vDif', 'gCBS/gDif/vDif');
   }
 
   /* ---------- pagamento, cobrança, volumes ---------- */
-  const vNF = num(select(inf, 'total/ICMSTot/vNF'));
+  const vNF = val(select(inf, 'total/ICMSTot/vNF'));
   const pag = child(inf, 'pag');
   if (pag && vNF !== undefined) {
     const detPags = childrenNamed(pag, 'detPag');
@@ -543,14 +620,19 @@ export function runNfeRules(nfe: XNode, ctx: RuleCtx): Finding[] {
     }
   }
   const transp = child(inf, 'transp');
-  for (const vol of childrenNamed(transp, 'vol')) {
+  const vols = childrenNamed(transp, 'vol');
+  const plTotal = vols.reduce((a, v) => a + (num(child(v, 'pesoL')) ?? 0), 0);
+  for (const vol of vols) {
     const pl = num(child(vol, 'pesoL')), pb = num(child(vol, 'pesoB'));
     if (pl !== undefined && pb !== undefined && pb < pl) out.push({ sev: 'aviso', origin: 'regra', title: 'Peso bruto menor que o líquido', message: `pesoB (${pb}) é menor que pesoL (${pl}). O peso bruto inclui embalagem.`, ...at(child(vol, 'pesoB')), found: String(pb), fix: { text: 'Confira se os campos não foram invertidos.' } });
-    // escala: produtos em KG x peso líquido
+  }
+  // escala: produtos em KG x peso líquido de todos os volumes
+  {
     const kg = dets.filter((d) => /^(KG|KGS|KILO|KILOS|QUILO)$/i.test(select(d, 'prod/uCom')?.text ?? '')).reduce((s, d) => s + (num(select(d, 'prod/qCom')) ?? 0), 0);
-    if (kg > 0 && pl) {
-      const ratio = pl / kg;
-      if (ratio >= 500 || ratio <= 1 / 500) out.push({ sev: 'aviso', origin: 'regra', title: 'Peso líquido fora de escala', message: `Os itens em KG somam ${kg.toLocaleString('pt-BR')} kg, mas pesoL é ${pl.toLocaleString('pt-BR')}. A diferença de ~${ratio > 1 ? Math.round(ratio) : Math.round(1 / ratio)}× sugere erro de unidade (kg × t ou ×1000).`, ...at(child(vol, 'pesoL')), found: String(pl), fix: { text: 'Confira a unidade do peso na geração da nota.' } });
+    const first = vols.find((v) => num(child(v, 'pesoL')));
+    if (kg > 0 && plTotal > 0 && first) {
+      const ratio = plTotal / kg;
+      if (ratio >= 500 || ratio <= 1 / 500) out.push({ sev: 'aviso', origin: 'regra', title: 'Peso líquido fora de escala', message: `Os itens em KG somam ${kg.toLocaleString('pt-BR')} kg, mas o peso líquido ${vols.length > 1 ? 'dos volumes soma' : 'é'} ${plTotal.toLocaleString('pt-BR')}. A diferença de ~${ratio > 1 ? Math.round(ratio) : Math.round(1 / ratio)}× sugere erro de unidade (kg × t ou ×1000).`, ...at(child(first, 'pesoL')), found: String(plTotal), fix: { text: 'Confira a unidade do peso na geração da nota.' } });
     }
   }
 

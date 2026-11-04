@@ -36,8 +36,13 @@ describe('TX2', () => {
   });
   it('1080: item sem grupo IBSCBS', async () => {
     const a = await run('erro-1080-item-sem-ibscbs.tx2');
-    expect(titles(a)).toContain('1080 Item 2 sem grupo IBSCBS');
-    expect(a.findings.find((f) => f.tx2Field === 'vIBSUF_W41')?.fix?.value).toBe('1.50');
+    expect(titles(a)).toContain('- Item 2 sem grupo IBSCBS');
+    expect(a.findings.find((f) => f.title === 'Item 2 sem grupo IBSCBS')?.sev).toBe('aviso');
+    // total não fecha porque o item 2 está sem o grupo: não sugere baixar o total
+    const t = a.findings.find((f) => f.tx2Field === 'vIBSUF_W41')!;
+    expect(t.code).toBe('1080');
+    expect(t.fix?.value).toBeUndefined();
+    expect(t.message).toContain('item 2 está sem o grupo IBSCBS');
   });
   it('929: CST 51 sem pRedBC aponta a linha do modBC e mostra a linha de TX2 a inserir', async () => {
     const a = await run('erro-929-cst51-sem-predbc.tx2');
@@ -171,10 +176,10 @@ describe('posição da tag que falta', () => {
       .replace('vICMS_N17=180.00', 'vICMSOp_N16a=180.00\nvICMSDif_N16c=180.00\nvICMS_N17=0.00')
       .replace('vICMS_W04=318.00', 'vICMS_W04=138.00');
     const g1 = (await analyze(base, eng))[0].findings.find((x) => x.code === '929')!.ghosts!;
-    expect(g1.map((g) => g.text)).toEqual(['pRedBC_N14=0.00', 'pDif_N16b=100.0000']);
+    expect(g1.map((g) => g.text)).toEqual(['pRedBC_N14=0.00', 'pDif_N16b=100.00']);
     const reduzida = base.replace('vBC_N15=1500.00', 'vBC_N15=1200.00').replace('vBC_W03=2650.00', 'vBC_W03=2350.00');
     const g2 = (await analyze(reduzida, eng))[0].findings.find((x) => x.code === '929')!.ghosts!;
-    expect(g2[0].text).toBe('pRedBC_N14=20.0000');
+    expect(g2[0].text).toBe('pRedBC_N14=20.00');
   });
   it('XML: natOp entra entre cNF e mod', async () => {
     const a = await run('erro-schema-variados.xml');

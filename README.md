@@ -16,11 +16,20 @@ Nasceu do suporte técnico a um ERP fiscal: a SEFAZ devolve "225 – Falha no Sc
 
 O libxml2 (como a SEFAZ) para de validar um grupo no primeiro erro. Uma varredura própria confere todos os campos contra o dicionário extraído do XSD, então os erros aparecem todos de uma vez.
 
-**Contas.** Totais contra a soma dos itens (531, 532, 564, 610), `qCom × vUnCom` (629), ICMS, diferimento do CST 51, FCP, IPI, PIS/COFINS, IBS/CBS por esfera e totais de IBS/CBS (1080). A diferença é mostrada em reais, com o valor que fecha a conta.
+**Contas.** Totais contra a soma dos itens (531–534, 564, 610), `qCom × vUnCom` (629), ICMS, ICMS ST, diferimento do CST 51, FCP, IPI, PIS/COFINS, IBS/CBS por esfera e totais de IBS/CBS (1076, 1080, 1084, 1085, 1091). A diferença é mostrada em reais, com o valor que fecha a conta e a linha antes/depois.
 
-**Coerência.** Chave de acesso contra os campos da nota (502) e dígito verificador (inclusive CNPJ alfanumérico), CFOP contra tipo e destino da operação (518, 519), não contribuinte (508, 696), CST 51 sem `pRedBC`/`pDif` (929), item sem grupo IBS/CBS, fuso horário errado para a UF (703), peso fora de escala, duplicatas e pagamentos que não fecham.
+As contas são encadeadas: quando o total não fecha só porque um item está com a conta errada, a rejeição continua sendo apontada (a SEFAZ soma os itens como estão), mas a correção vai para o item, não para o total. Uma conta nunca usa como entrada um valor que outra conta já apontou como errado.
 
-**O que ele não faz:** não consulta a SEFAZ (cadastro, situação da chave, regras próprias de cada UF) e **não sugere CST, CFOP nem alíquota**. Correções de cálculo mostram o valor que fecha a conta com os demais campos; se o valor do arquivo estiver certo, o erro está em algum campo usado no cálculo.
+**Coerência.** Chave de acesso contra os campos da nota (502) e dígito verificador (inclusive CNPJ alfanumérico), CFOP contra tipo e destino da operação (518, 519, 772, 773), não contribuinte (508, 696), CST 51 sem `pRedBC`/`pDif` (929), item sem grupo IBS/CBS, prazos (228, 506, 703), fuso horário da UF, peso fora de escala, duplicatas e pagamentos que não fecham.
+
+**Campos que faltam** aparecem encaixados na posição certa do arquivo enviado (linha `campo_ID=valor` no TX2, tag no XML). Quando o valor sai de conta com o próprio arquivo, ele já vem preenchido: `pRedBC` e `pDif` só quando o percentual é inteiro (com casas decimais, mais de um percentual fecha a mesma conta) e a base do IBS/CBS pela mesma regra que os outros itens da nota seguem.
+
+**O que ele não faz:** não consulta a SEFAZ (cadastro, situação da chave, regras próprias de cada UF) e **não sugere CST, cClassTrib, CFOP nem alíquota**. Correções de cálculo mostram o valor que fecha a conta com os demais campos; se o valor do arquivo estiver certo, o erro está em algum campo usado no cálculo.
+
+**Limitações conhecidas**
+- TX2 com grupos repetidos dentro de grupos repetidos (lacres de vários volumes, adições de várias DI) não é montado corretamente; aparece como "Campo repetido".
+- Códigos 1076, 1084, 1085 e 1091 (totais de IBS/CBS) vêm da tabela de rejeições da reforma e ainda não foram vistos em retorno real.
+- Regras específicas de cada UF não são conferidas.
 
 ## TX2
 
@@ -47,12 +56,21 @@ Na tela: abra, arraste ou cole (Ctrl+V) o arquivo. Cada problema tem link para a
 ```bash
 npm install
 npm run dev        # servidor local
-npm test           # testes com os exemplos de /exemplos
+npm test           # testes (exemplos, cenários de revisão, mutações e casos de borda)
+npm run test:stress   # varredura pesada: 400 notas geradas + mutações em 40 notas (~10 min)
 npm run build      # gera dist/index.html (arquivo único)
 npm run check -- exemplos/erro-calculos.tx2   # diagnóstico no terminal
 ```
 
 Para atualizar o leiaute: troque os XSDs em `schemas/nfe/` e rode `npm run schemas`. O dicionário de campos (`src/generated/nfe-dict.json`) e os schemas enxutos são gerados a partir deles.
+
+### Como o validador é testado
+
+- **Notas geradas** (`test/gen/nota.ts`): um gerador monta notas válidas com contas consistentes (Simples e regime normal, CST 00/10/20/40/51/60, CSOSN, ST, IPI tributado, PIS/COFINS por alíquota, IBS/CBS com e sem redução, frete, seguro, desconto, parcelas, pagamentos com troco, interestadual, consumidor final, fusos de UF diferentes) e escreve cada uma em XML e em TX2 de forma independente.
+- **Falso positivo:** nota válida não pode ter erro nem aviso, em XML formatado, XML numa linha só e TX2; e o XML montado do TX2 tem que ser idêntico ao XML gerado.
+- **Mutação:** um erro conhecido é plantado por vez (conta de item, total, formato, chave, datas, tag faltando, grupo faltando). O teste exige que o validador ache o erro, aponte a linha do campo, sugira o valor original e que, aplicando a correção pelo mesmo código da tela, a nota fique limpa.
+- **Casos de borda:** lote `enviNFe`, `nfeProc` com assinatura e protocolo, XML assinado, prefixo de namespace, CDATA, ANSI/UTF-8/BOM, arquivos cortados e entradas inválidas, nota com 300 itens.
+- **Cenários de revisão** (`test/revisao.test.ts`): cada problema encontrado numa revisão independente vira um teste.
 
 ### Estrutura
 

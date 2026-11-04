@@ -3,6 +3,8 @@ import type { Analysis, Finding, Ghost } from '../core/types';
 import { analyze, type Engine } from '../core/analyze';
 import { nfeDict, nfeSchemas } from '../core/engine-data';
 import { createBrowserRunner } from '../browser/xsd-runner';
+import { valueFixFor, insertFixFor, insertable } from '../core/fixes';
+import { decodeBytes } from '../core/decode';
 
 /* ------------------------------------------------------------------ */
 /* Exemplos (dados fictícios, da pasta /exemplos)                       */
@@ -25,6 +27,14 @@ for (const [path, txt] of Object.entries(rawExamples)) examples.set(path.split('
 
 const REJ: Record<string, string> = {
   '225': 'Falha no schema XML',
+  '228': 'Data de emissão muito atrasada',
+  '506': 'Data de saída menor que a data de emissão',
+  '772': 'Operação interestadual e UF do destinatário igual à do emitente',
+  '773': 'Operação interna e UF do destinatário diferente da do emitente',
+  '1076': 'Total da base do IBS/CBS difere da soma dos itens',
+  '1084': 'Total do IBS do município difere da soma dos itens',
+  '1085': 'Total do IBS difere da soma dos itens',
+  '1091': 'Total da CBS difere da soma dos itens',
   '502': 'Chave de acesso não corresponde aos campos',
   '508': 'CST incompatível com não contribuinte',
   '518': 'CFOP de entrada em NF-e de saída',
@@ -131,18 +141,9 @@ function download(name: string, text: string, latin1: boolean) {
 /* ------------------------------------------------------------------ */
 let sourceIsLatin1 = false;
 async function readFile(f: File): Promise<string> {
-  const buf = await f.arrayBuffer();
-  const head = new TextDecoder('ascii').decode(buf.slice(0, 200));
-  const declared = /encoding=["']([^"']+)/i.exec(head)?.[1]?.toLowerCase();
-  try {
-    sourceIsLatin1 = false;
-    if (declared && !/utf-?8/.test(declared)) { sourceIsLatin1 = true; return new TextDecoder(declared).decode(buf); }
-    return new TextDecoder('utf-8', { fatal: true }).decode(buf);
-  } catch {
-    // TX2 gerado por sistemas Windows costuma vir em ANSI (Windows-1252)
-    sourceIsLatin1 = true;
-    return new TextDecoder('windows-1252').decode(buf);
-  }
+  const r = decodeBytes(await f.arrayBuffer());
+  sourceIsLatin1 = r.latin1;
+  return r.text;
 }
 
 async function load(text: string, fileName: string, example?: string) {
@@ -178,55 +179,14 @@ async function run() {
 /* ------------------------------------------------------------------ */
 /* Aplicar correção                                                    */
 /* ------------------------------------------------------------------ */
-function applyTarget(f: Finding, a: Analysis): ((text: string) => string | null) | null {
-  if (!f.fix?.value || !f.line) return null;
-  const value = f.fix.value;
-  if (a.kind === 'tx2') {
-    if (!f.tx2Field) return null;
-    return (text) => {
-      const lines = text.split(/\r?\n/);
-      const i = f.line! - 1;
-      if (!lines[i] || !lines[i].startsWith(f.tx2Field! + '=')) return null;
-      lines[i] = `${f.tx2Field}=${value}`;
-      return lines.join(text.includes('\r\n') ? '\r\n' : '\n');
-    };
-  }
-  return (text) => {
-    const lines = text.split('\n');
-    const i = f.line! - 1;
-    const l = lines[i];
-    if (l === undefined) return null;
-    const leaf = /^(\s*<([\w:]+)(?:\s[^>]*)?>)([^<]*)(<\/\2>\s*)$/.exec(l);
-    const xv = value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    if (leaf) { lines[i] = leaf[1] + xv + leaf[4]; return lines.join('\n'); }
-    if (/^NFe[0-9A-Z]{44}$/.test(value) && /\sId="[^"]*"/.test(l)) { lines[i] = l.replace(/\sId="[^"]*"/, ` Id="${value}"`); return lines.join('\n'); }
-    return null;
-  };
-}
-
-/** Prévias que dá para inserir sem digitar nada: valor conhecido e ID do leiaute conhecido. */
-const insertable = (f: Finding) => (f.ghosts ?? []).filter((g) => !g.fill && !g.text.includes('…') && !/_\?=/.test(g.text));
+const applyTarget = (f: Finding, a: Analysis) => valueFixFor(f, a.kind);
+const insertTarget = insertFixFor;
 const canInsert = (f: Finding) => insertable(f).length > 0;
 const insertLabel = (f: Finding) => {
   const ok = insertable(f);
   if (ok.length === (f.ghosts ?? []).length) return 'Inserir no arquivo';
   return 'Inserir ' + ok.map((g) => (g.format === 'tx2' ? g.text.split('=')[0] : g.name)).join(' e ');
 };
-function insertTarget(f: Finding): ((text: string) => string | null) | null {
-  if (!canInsert(f)) return null;
-  return (text) => {
-    const nl = text.includes('\r\n') ? '\r\n' : '\n';
-    const lines = text.split(/\r?\n/);
-    const gs = [...insertable(f)].sort((x, y) => y.afterLine - x.afterLine);
-    for (const g of gs) {
-      if (lines[g.afterLine - 1] === undefined) return null;
-      const add = g.format === 'tx2' ? g.text.split('\n') : [('  '.repeat(g.depth)) + g.text];
-      lines.splice(g.afterLine, 0, ...add);
-    }
-    return lines.join(nl);
-  };
-}
-
 async function apply(f: Finding, mode: 'value' | 'insert' = 'value') {
   const a = S.results?.[S.note];
   if (!a || !S.text) return;

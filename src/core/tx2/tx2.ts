@@ -1,6 +1,7 @@
 import type { XNode, Finding } from '../types';
 import { Dict, type DNode, type Group, type Particle, maxOf } from '../dict';
 import type { Ghost } from '../types';
+import { requiredLeaves } from '../ghost';
 import { dictPath } from '../xml/parse';
 import { chaveFromIde } from '../rules/nfe';
 
@@ -45,6 +46,7 @@ export function parseTx2(text: string): Tx2Note[] {
   let itemCount = 0;
   let part: { name: string; n: number } | undefined;
   const partCount = new Map<string, number>();
+  let closed = false;
   const newNote = (line: number) => {
     cur = { fields: [], unknown: [], startLine: line, endLine: line, problems: [] };
     notes.push(cur);
@@ -56,8 +58,11 @@ export function parseTx2(text: string): Tx2Note[] {
     const t = s.trim();
     if (!t || t.startsWith('*') || t.startsWith('//') || t.startsWith('#')) return;
     const up = t.toUpperCase();
-    if (up === 'INCLUIR') { newNote(line); return; }
-    if (up === 'SALVAR') { if (cur) cur.endLine = line; if (item !== undefined && cur) cur.problems.push(tx2Problem(line, 'SALVAR com item aberto', `O item ${item} foi aberto com INCLUIRITEM e não tem SALVARITEM antes do SALVAR.`, 'Inclua SALVARITEM no fim do bloco do item.')); item = undefined; return; }
+    if (up === 'INCLUIR') {
+      if (cur && !closed) cur.problems.push(tx2Problem(line, 'INCLUIR sem SALVAR da nota anterior', `A nota iniciada na linha ${cur.startLine} não tem SALVAR antes deste INCLUIR.`, 'Inclua SALVAR no fim do bloco da nota anterior.'));
+      newNote(line); closed = false; return;
+    }
+    if (up === 'SALVAR') { if (cur) cur.endLine = line; if (item !== undefined && cur) cur.problems.push(tx2Problem(line, 'SALVAR com item aberto', `O item ${item} foi aberto com INCLUIRITEM e não tem SALVARITEM antes do SALVAR.`, 'Inclua SALVARITEM no fim do bloco do item.')); item = undefined; closed = true; return; }
     if (up === 'INCLUIRITEM') {
       if (!cur) newNote(line);
       if (item !== undefined) cur!.problems.push(tx2Problem(line, 'INCLUIRITEM sem fechar o item anterior', `O item ${item} não tem SALVARITEM antes do próximo INCLUIRITEM.`, 'Inclua SALVARITEM no fim do bloco do item anterior.'));
@@ -81,7 +86,12 @@ export function parseTx2(text: string): Tx2Note[] {
     const name = s.slice(0, eq).trim();
     const value = s.slice(eq + 1);
     if (/^(formato|numlote)$/i.test(name)) return;
-    if (!cur) newNote(line);
+    if (!cur || closed) {
+      const after = cur && closed;
+      newNote(line);
+      closed = false;
+      if (after) cur!.problems.push(tx2Problem(line, 'Campos depois do SALVAR sem INCLUIR', 'Há campos depois do SALVAR da nota anterior, sem um novo INCLUIR. Eles foram lidos como outra nota.', 'Inclua INCLUIR antes dos campos da próxima nota, ou remova as linhas que sobraram.'));
+    }
     const m = FIELD.exec(name);
     if (!m) { cur!.unknown.push({ line, field: name }); return; }
     cur!.fields.push({
@@ -288,40 +298,73 @@ export function buildFromTx2(note: Tx2Note, dict: Dict): BuildResult {
  * e depois desfaz ambiguidades restantes pela ordem dos IDs do leiaute.
  */
 function resolveChoices(placed: Placed[], dict: Dict) {
-  const score = new Map<Group, Map<number, number>>();
-  const add = (g: Group, i: number, v: number) => {
-    if (!score.has(g)) score.set(g, new Map());
-    const m = score.get(g)!;
+  // a escolha (xs:choice) é decidida por repetição: refNF no _1 e refNFP no _2 são grupos diferentes
+  const inst = (p: Placed) => `${p.f.idx ?? ''}|${p.f.part ? p.f.part.name + p.f.part.n : ''}`;
+  const gid = new Map<Group, number>();
+  const key = (g: Group, p: Placed) => { if (!gid.has(g)) gid.set(g, gid.size); return gid.get(g) + '#' + inst(p); };
+  const score = new Map<string, Map<number, number>>();
+  const add = (k: string, i: number, v: number) => {
+    if (!score.has(k)) score.set(k, new Map());
+    const m = score.get(k)!;
     m.set(i, (m.get(i) ?? 0) + v);
   };
   for (const p of placed) {
     for (const c of p.cands) {
       const brs = dict.branchesUpTo(c, dict.root);
       const enumHit = c.f?.e ? (c.f.e.includes(p.f.value) ? 10 : -10) : 0;
-      for (const b of brs) add(b.choice, b.index, 1 + enumHit);
+      for (const b of brs) add(key(b.choice, p), b.index, 1 + enumHit);
     }
   }
-  const chosen = new Map<Group, number>();
-  for (const [g, m] of score) {
+  // desempate: o ramo cujos campos obrigatórios estão todos presentes (ex.: refNF x refNFP, que exige IE)
+  const present = new Map<string, Set<string>>();
+  for (const p of placed) {
+    const k = inst(p);
+    if (!present.has(k)) present.set(k, new Set());
+    for (const c of p.cands) present.get(k)!.add(c.path);
+  }
+  for (const [k, m] of score) {
+    const [gi, ik] = [+k.split('#')[0], k.slice(k.indexOf('#') + 1)];
+    const g = [...gid.entries()].find(([, v]) => v === gi)?.[0];
+    if (!g?.ch) continue;
+    for (const i of m.keys()) {
+      const br = g.ch[i] as DNode;
+      if (br?.n === undefined) continue;
+      const req = br.c?.length ? requiredLeaves(dict, br) : [br];
+      if (!req.length) continue;
+      const have = req.filter((r) => present.get(ik)?.has(r.path)).length;
+      m.set(i, m.get(i)! + 5 * (have / req.length));
+    }
+  }
+  const chosen = new Map<string, number>();
+  for (const [k, m] of score) {
     let best = -Infinity, bi = 0;
     for (const [i, v] of m) if (v > best) { best = v; bi = i; }
-    chosen.set(g, bi);
+    chosen.set(k, bi);
   }
   for (const p of placed) {
-    const ok = p.cands.filter((c) => dict.branchesUpTo(c, dict.root).every((b) => chosen.get(b.choice) === b.index));
+    const ok = p.cands.filter((c) => dict.branchesUpTo(c, dict.root).every((b) => chosen.get(key(b.choice, p)) === b.index));
     if (ok.length) p.cands = ok;
   }
-  // âncoras: campos sem ambiguidade, mesma letra
-  const anchors = placed.filter((p) => p.cands.length === 1);
+  // nomes repetidos no mesmo grupo (UF da transportadora, do veículo e do reboque...): resolve na ordem
+  // dos IDs do leiaute, usando o último campo já resolvido como limite inferior e a próxima âncora como superior
+  const groups = new Map<string, Placed[]>();
   for (const p of placed) {
-    if (p.cands.length < 2) continue;
-    const same = anchors.filter((a) => a.f.letters === p.f.letters && a !== p);
-    const prev = same.filter((a) => cmpId(a.f, p.f) < 0).sort((a, b) => cmpId(b.f, a.f))[0];
-    const next = same.filter((a) => cmpId(a.f, p.f) > 0).sort((a, b) => cmpId(a.f, b.f))[0];
-    const lo = prev?.cands[0].o ?? -Infinity, hi = next?.cands[0].o ?? Infinity;
-    const between = p.cands.filter((c) => c.o > lo && c.o < hi);
-    if (between.length) p.cands = between;
-    p.cands.sort((a, b) => a.o - b.o);
+    const k = p.f.letters + '|' + inst(p);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k)!.push(p);
+  }
+  for (const list of groups.values()) {
+    list.sort((a, b) => cmpId(a.f, b.f));
+    let last = -Infinity;
+    list.forEach((p, i) => {
+      if (p.cands.length > 1) {
+        const next = list.slice(i + 1).find((q) => q.cands.length === 1);
+        const hi = next?.cands[0].o ?? Infinity;
+        const after = p.cands.filter((c) => c.o > last && c.o < hi).sort((a, b) => a.o - b.o);
+        p.cands = after.length ? after : [...p.cands].sort((a, b) => a.o - b.o);
+      }
+      last = Math.max(last, p.cands[0].o);
+    });
   }
 }
 
@@ -388,31 +431,6 @@ function idFor(path: string, learned: Map<string, string>): string | undefined {
   let best: [string, string] | undefined;
   for (const kv of KNOWN_IDS) if (n.endsWith('/' + kv[0]) && (!best || kv[0].length > best[0].length)) best = kv;
   return best?.[1];
-}
-
-/** Campos obrigatórios de um grupo (para mostrar o esqueleto de um grupo que falta). */
-function requiredLeaves(dict: Dict, dn: DNode): DNode[] {
-  // obrigatórios; de uma escolha (xs:choice) do primeiro nível, usa o primeiro ramo (ex.: gIBSCBS)
-  const out: DNode[] = [];
-  const walkP = (p: Particle, top: boolean) => {
-    if ((p as DNode).n !== undefined) {
-      const d = p as DNode;
-      if ((d.min ?? 1) === 0) return;
-      if (d.c?.length) for (const x of d.c) walkP(x, false);
-      else if (d.k === 'e') out.push(d);
-      return;
-    }
-    const g = p as Group;
-    if (g.s) { if ((g.min ?? 1) === 0) return; for (const x of g.s) walkP(x, top); }
-    else if (g.ch?.length) {
-      if ((g.min ?? 1) > 0) walkP(g.ch[0], false);
-      // escolha opcional: só a primeira do grupo (no IBSCBS, gIBSCBS); as demais são situações específicas
-      else if (top && !usedOptionalChoice) { usedOptionalChoice = true; walkP(g.ch[0], true); }
-    }
-  };
-  let usedOptionalChoice = false;
-  for (const p of dn.c ?? []) walkP(p, true);
-  return out;
 }
 
 const maxLine = (n: XNode): number | undefined => {

@@ -8,7 +8,8 @@
     "build": "node scripts/build-schemas.mjs && tsc -p . && vite build",
     "build:artifact": "npm run build && node scripts/artifact.mjs",
     "test": "vitest run",
-    "check": "vite-node test/run-file.ts"
+    "check": "vite-node test/run-file.ts",
+    "test:stress": "vite-node test/gen/sweep.ts 400 && vite-node test/gen/mutsweep.ts 40"
   },
   "author": "Guilherme Lopes",
   "license": "MIT",

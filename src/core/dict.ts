@@ -192,6 +192,24 @@ export function valueOk(v: string, f: Facets | undefined): boolean {
 }
 
 /** Tenta corrigir o valor para o formato exigido. Só retorna se o resultado passa no formato. */
+/** Arredonda um número escrito em decimal (string) para d casas, meio para cima, sem passar por binário. */
+export function roundDecStr(s: string, d: number): string {
+  const m = /^(\d+)(?:\.(\d*))?$/.exec(s);
+  if (!m) return s;
+  const [ip, fp = ''] = [m[1], m[2] ?? ''];
+  const digits = (ip + fp.padEnd(d + 1, '0').slice(0, d + 1)).replace(/^0+(?=\d)/, '');
+  let n = BigInt(digits.slice(0, -1) || '0');
+  if (+digits.slice(-1) >= 5) n += 1n;
+  const str = n.toString().padStart(d + 1, '0');
+  const out = d ? `${str.slice(0, -d)}.${str.slice(-d)}` : str;
+  return out.replace(/^0+(?=\d)/, '');
+}
+const padDec = (s: string, d: number) => {
+  const [i, f = ''] = s.split('.');
+  return d ? `${i}.${f.padEnd(d, '0')}` : i;
+};
+
+/** Tenta corrigir o valor para o formato exigido. Só retorna se o resultado passa no formato. */
 export function suggestValue(v: string, f: Facets | undefined): { value: string; how: string } | null {
   if (!f || v === '') return null;
   const tries: { value: string; how: string }[] = [];
@@ -199,21 +217,26 @@ export function suggestValue(v: string, f: Facets | undefined): { value: string;
   if (dec) {
     let s = v.trim();
     let how = '';
-    if (/^-?\d{1,3}(\.\d{3})+,\d+$/.test(s)) { s = s.replace(/\./g, '').replace(',', '.'); how = 'troquei a vírgula decimal por ponto e tirei o separador de milhar'; }
-    else if (s.includes(',')) { s = s.replace(/\./g, '').replace(',', '.'); how = 'troquei a vírgula decimal por ponto'; }
-    if (/^0\d/.test(s)) { s = s.replace(/^0+(?=\d)/, ''); how = how ? how + ' e tirei os zeros à esquerda' : 'tirei os zeros à esquerda'; }
-    const num = Number(s);
-    if (!isNaN(num) && num >= 0) {
+    let ok = true;
+    if (/^\d{1,3}(\.\d{3})+,\d+$/.test(s)) { s = s.replace(/\./g, '').replace(',', '.'); how = 'troquei a vírgula decimal por ponto e tirei o separador de milhar'; }
+    else if (/^\d{1,3}(,\d{3})+(\.\d+)?$/.test(s)) { s = s.replace(/,/g, ''); how = 'tirei a vírgula de milhar'; }
+    else if (/^\d+,\d+$/.test(s)) { s = s.replace(',', '.'); how = 'troquei a vírgula decimal por ponto'; }
+    else if (/^\d{1,3}(\.\d{3}){2,}$/.test(s)) ok = false; // "1.500.000": separador de milhar, sem decimal claro
+    else if (s.includes(',')) ok = false;
+    // "1.500" com 3 casas: lido como decimal (é o que os sistemas geram), mas avisa
+    const ambiguo = /^\d{1,3}\.\d{3}$/.test(s) && (dec.dmax ?? 0) < 3;
+    if (ok && /^0\d/.test(s)) { s = s.replace(/^0+(?=\d)/, ''); how = how ? how + ' e tirei os zeros à esquerda' : 'tirei os zeros à esquerda'; }
+    if (ok && /^\d+(\.\d+)?$/.test(s)) {
       const [, d = ''] = s.split('.');
       if (dec.dmax && d.length > dec.dmax) {
-        tries.push({ value: num.toFixed(dec.dmax), how: (how ? how + '; ' : '') + `arredondei para ${dec.dmax} casas (confira se o cálculo de origem não deveria ser ajustado)` });
+        tries.push({ value: roundDecStr(s, dec.dmax), how: (how ? how + '; ' : '') + `arredondei para ${dec.dmax} casas (confira se o cálculo de origem não deveria ser ajustado)` + (ambiguo ? `. Li ${s} como número decimal; se o ponto era separador de milhar (${s.replace('.', '')}), corrija à mão` : '') });
       } else if (d.length && d.length < dec.dmin) {
-        tries.push({ value: num.toFixed(dec.dmin), how: (how ? how + '; ' : '') + `completei para ${dec.dmin} casas decimais` });
+        tries.push({ value: padDec(s, dec.dmin), how: (how ? how + '; ' : '') + `completei para ${dec.dmin} casas decimais` });
       } else if (dec.dmin && !d.length && !dec.decOptional) {
-        tries.push({ value: num.toFixed(dec.dmin), how: `incluí ${dec.dmin} casas decimais` });
+        tries.push({ value: padDec(s, dec.dmin), how: `incluí ${dec.dmin} casas decimais` });
       }
       tries.push({ value: s, how: how || 'ajustei o formato' });
-      if (dec.dmin) tries.push({ value: num.toFixed(dec.dmin), how: (how ? how + '; ' : '') + `formatei com ${dec.dmin} casas decimais` });
+      if (dec.dmin) tries.push({ value: d.length > dec.dmin ? roundDecStr(s, dec.dmin) : padDec(s, dec.dmin), how: (how ? how + '; ' : '') + `formatei com ${dec.dmin} casas decimais` });
     }
   }
   if (f.e) {
@@ -236,7 +259,8 @@ export function suggestValue(v: string, f: Facets | undefined): { value: string;
     let t = v.replace(/[\r\n\t]+/g, ' ').replace(/ {2,}/g, ' ').trim();
     if (t !== v) tries.push({ value: t, how: 'removi espaços no início/fim e quebras de linha' });
     const lim = f.len ?? f.mx;
-    if (lim && [...t].length > lim) tries.push({ value: [...t].slice(0, lim).join('').trim(), how: `cortei em ${lim} caracteres (confira se não perdeu informação importante)` });
+    const textoLivre = !f.e && !decimalShape(f) && (f.p ?? []).every((p) => p === T_STRING);
+    if (textoLivre && lim && [...t].length > lim) tries.push({ value: [...t].slice(0, lim).join('').trim(), how: `cortei em ${lim} caracteres (confira se não perdeu informação importante)` });
   }
   for (const t of tries) if (t.value !== v && valueOk(t.value, f)) return t;
   return null;

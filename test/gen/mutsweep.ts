@@ -10,7 +10,8 @@ let runs = 0;
 const fails = new Map<string, string[]>();
 for (let seed = s0; seed < s0 + n; seed++) {
   // metade das notas com perfil forçado para cobrir ST, CST 51, IPI e IBS com vários itens
-  const g = genNote(seed, seed % 2 ? {} : { crt: '3', ibs: true, items: 3, csts: ['00', '51', '10'], pf: false });
+  // perfis forçados: ST/CST 51/IBS com vários itens, devolução e nota com produtor rural referenciado
+  const g = genNote(seed, seed % 4 === 1 ? {} : seed % 4 === 2 ? { crt: '3', ibs: true, items: 3, csts: ['00', '51', '10'], pf: false, fin: '1', ref: 'none' } : seed % 4 === 3 ? { fin: '4', items: 2 } : { fin: '1', ref: 'refNFP' });
   for (const mu of mutationsFor(g)) for (const kind of ['tx2', 'xml'] as const) {
     runs++;
     const r = await runMutation(g, mu, kind, eng);

@@ -23,6 +23,8 @@ export interface Mutation {
   ghostOptional?: boolean;
   /** depois de aplicar a correção (ou inserir), a nota tem que ficar limpa */
   roundTrip?: 'value' | 'insert';
+  /** formatos em que a mutação vale (padrão: os dois) */
+  kinds?: ('xml' | 'tx2')[];
   /** achados que não podem aparecer (ex.: total quando o erro é do item) */
   forbid?: (f: Finding) => boolean;
 }
@@ -110,11 +112,12 @@ export function mutationsFor(g: GenNote): Mutation[] {
   const k51 = g.items.findIndex((i) => i.cst === '51');
   if (k51 >= 0) {
     const i51 = g.items[k51];
-    M.push({
+    // o RS autoriza CST 51 sem pRedBC/pDif: lá não há o que apontar
+    if (g.uf !== 'RS') M.push({
       name: 'CST 51 sem pRedBC', apply: (x) => { delete icms(x, k51).pRedBC; },
       match: (f) => f.code === '929', ghost: i51.pRedBC, ghostOptional: true, roundTrip: 'insert',
     });
-    M.push({
+    if (g.uf !== 'RS') M.push({
       name: 'CST 51 sem pDif', apply: (x) => { delete icms(x, k51).pDif; },
       match: (f) => f.code === '929', ghost: i51.pDif, ghostOptional: true, roundTrip: 'insert',
     });
@@ -147,6 +150,40 @@ export function mutationsFor(g: GenNote): Mutation[] {
     }
   }
 
+  // --- documentos referenciados e devolução ---
+  const ideM = m.ide as MGroup;
+  if (g.fin === '4') {
+    M.push({ name: 'devolução sem NFref', apply: (x) => { delete (x.ide as MGroup).NFref; }, match: (f) => f.code === '321' });
+    M.push({
+      name: 'CFOP de venda em nota de devolução', apply: (x) => { prod(x, 0).CFOP = (prod(x, 0).CFOP as string).replace(/202$/, '102'); },
+      match: (f) => f.code === '327', tag: 'CFOP',
+    });
+  } else {
+    M.push({
+      name: 'CFOP de devolução em nota normal', apply: (x) => { prod(x, 0).CFOP = (prod(x, 0).CFOP as string).replace(/\d{3}$/, '202'); },
+      match: (f) => f.code === '328', tag: 'CFOP',
+    });
+  }
+  const refs = ideM.NFref as MGroup[] | undefined;
+  if (refs?.[0]?.refNFe) {
+    const k0 = refs[0].refNFe as string;
+    M.push({
+      name: 'chave referenciada com DV errado', apply: (x) => { ((x.ide as MGroup).NFref as MGroup[])[0].refNFe = k0.slice(0, 43) + String((+k0[43] + 1) % 10); },
+      match: (f) => f.code === '547', tag: 'refNFe',
+    });
+    M.push({
+      name: 'referência à própria chave', apply: (x) => { ((x.ide as MGroup).NFref as MGroup[])[0].refNFe = g.chave; },
+      match: (f) => f.title === 'A nota referencia a própria chave', tag: 'refNFe',
+    });
+  }
+  const kD = (m.det as MGroup[]).findIndex((d) => d.impostoDevol);
+  if (kD >= 0) {
+    M.push({
+      name: 'total vIPIDevol errado', apply: (x) => { tot(x).vIPIDevol = add(tot(x).vIPIDevol as string, 1); },
+      match: (f) => /^Total vIPIDevol/.test(f.title), tag: 'vIPIDevol', fix: tot(m).vIPIDevol as string, roundTrip: 'value',
+    });
+  }
+
   // --- formatos (a correção tem que devolver o valor original) ---
   const vp = prod(m, 0).vProd as string;
   M.push({
@@ -165,8 +202,14 @@ export function mutationsFor(g: GenNote): Mutation[] {
   });
   const xp = prod(m, 0).xProd as string;
   M.push({
-    name: 'espaço no fim do xProd', apply: (x) => { prod(x, 0).xProd = xp + ' '; },
+    name: 'espaço no fim do xProd', apply: (x) => { prod(x, 0).xProd = xp + ' '; }, kinds: ['xml'],
     match: (f) => f.code === '225' && /xProd/.test(f.title), tag: 'xProd', fix: xp, roundTrip: 'value',
+  });
+  // no TX2 o componente remove o espaço: só informação, sem erro
+  M.push({
+    name: 'espaço no fim do xProd (TX2: o componente remove)', apply: (x) => { prod(x, 0).xProd = xp + ' '; }, kinds: ['tx2'],
+    match: (f) => f.sev === 'info' && /^Espaço no início ou no fim/.test(f.title),
+    forbid: (f) => f.sev !== 'info',
   });
   const xn = (m.emit as MGroup).xNome as string;
   M.push({
@@ -232,6 +275,7 @@ const sameNum = (a?: string, b?: string) => a !== undefined && b !== undefined &
 
 export async function runMutation(g: GenNote, mu: Mutation, kind: 'xml' | 'tx2', eng: Engine): Promise<MutResult> {
   const problems: string[] = [];
+  if (mu.kinds && !mu.kinds.includes(kind)) return { ok: true, problems };
   const model = structuredClone(g.model);
   mu.apply(model);
   const g2 = { ...g, model };

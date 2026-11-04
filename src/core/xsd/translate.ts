@@ -220,7 +220,9 @@ function facetFinding(ctx: TranslateCtx, node: XNode | undefined, el: string, at
     return base;
   }
 
-  const sug = suggestValue(value, dn?.f);
+  let sug = suggestValue(value, dn?.f);
+  // cListServ (LC 116, NN.NN) preenchido com o código de tributação nacional da NFS-e (6 dígitos)
+  if (!sug && el === 'cListServ' && /^\d{6}$/.test(value)) sug = { value: `${value.slice(0, 2)}.${value.slice(2, 4)}`, how: `${value} é o código de tributação nacional (cTribNac) da NFS-e; o cListServ usa o item da LC 116 no formato NN.NN, que são os 4 primeiros dígitos` };
   switch (facet) {
     case 'enumeration': {
       base.title = `Código não aceito em ${label}`;

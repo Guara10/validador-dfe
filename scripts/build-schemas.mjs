@@ -65,10 +65,12 @@ for (const D of DOCS) {
     const base = local(r.getAttribute('base'));
     if (base && simple[base]) collectSimple(simple[base], acc);
     else acc.b = base; // tipo XSD nativo (string, token, decimal...)
+    // padrões irmãos na mesma restrição valem como "OU"; padrões de níveis diferentes de derivação, como "E"
+    const sib = [];
     for (const k of kids(r)) {
       const v = k.getAttribute('value');
       switch (k.localName) {
-        case 'pattern': (acc.p ||= []).push(v); break;
+        case 'pattern': sib.push(v); break;
         case 'enumeration': {
           (acc.e ||= []).push(v);
           const d = docOf(k);
@@ -84,7 +86,7 @@ for (const D of DOCS) {
         case 'maxInclusive': acc.maxI = v; break;
       }
     }
-    // enumerações/patterns do tipo derivado substituem as do base
+    if (sib.length) (acc.p ||= []).push(sib.length === 1 ? sib[0] : sib.map((x) => `(?:${x})`).join('|'));
     return acc;
   }
   function collectSimple(st, acc = {}) {
@@ -127,8 +129,9 @@ for (const D of DOCS) {
     if (typeName && complex[typeName]) ct = complex[typeName];
     if (typeName && simple[typeName]) st = simple[typeName];
     if (ct) {
-      node.c = complexContent(ct, path);
+      // atributos primeiro: no MOC o ID do atributo vem antes dos filhos (ex.: obsCont xCampo Z05, xTexto Z06)
       const at = attributesOf(ct, path);
+      node.c = complexContent(ct, path);
       if (at.length) node.a = at;
       if (typeName) node.tn = typeName;
     } else if (st) {

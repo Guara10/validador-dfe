@@ -1,5 +1,5 @@
 import type { XNode, Finding } from '../types';
-import { Dict, type DNode, type Group, type Particle, maxOf } from '../dict';
+import { Dict, type DNode, type Group, type Particle, maxOf, valueOk } from '../dict';
 import type { Ghost } from '../types';
 import { requiredLeaves } from '../ghost';
 import { dictPath } from '../xml/parse';
@@ -28,6 +28,8 @@ export interface Tx2Note {
   startLine: number;
   endLine: number;
   problems: Finding[];
+  /** arquivo acabou sem SALVAR */
+  incomplete?: boolean;
 }
 
 const FIELD = /^(\d*)([A-Za-z][A-Za-z0-9]*)_([A-Z]{1,2})(\d{1,3})([a-z]?)(?:_(\d+))?$/;
@@ -80,12 +82,14 @@ export function parseTx2(text: string): Tx2Note[] {
       part = { name, n };
       return;
     }
-    if (up === 'SALVARPARTE') { part = undefined; return; }
+    if (up.startsWith('SALVARPARTE')) { part = undefined; return; }
     const eq = s.indexOf('=');
     if (eq < 0) { if (cur) cur.unknown.push({ line, field: t }); return; }
     const name = s.slice(0, eq).trim();
     const value = s.slice(eq + 1);
     if (/^(formato|numlote)$/i.test(name)) return;
+    // depois do SALVAR, o sistema grava parâmetros que não são do leiaute (NFC-e: CID_TOKEN, COD_CSC, VERSAO_QRCODE)
+    if (closed && cur && !FIELD.exec(name)) { cur.unknown.push({ line, field: name }); return; }
     if (!cur || closed) {
       const after = cur && closed;
       newNote(line);
@@ -101,6 +105,10 @@ export function parseTx2(text: string): Tx2Note[] {
     cur!.endLine = line;
   });
   if (cur && item !== undefined) cur.problems.push(tx2Problem(cur.endLine, 'Item sem SALVARITEM', `O item ${item} não foi fechado com SALVARITEM.`, 'Inclua SALVARITEM no fim do bloco do item.'));
+  if (cur && !closed) {
+    cur.incomplete = true;
+    cur.problems.unshift(tx2Problem(cur.endLine, 'TX2 incompleto: o arquivo termina sem SALVAR', `A nota começa na linha ${cur.startLine} e o arquivo acaba na linha ${cur.endLine} sem o SALVAR. O arquivo foi cortado ou ainda estava sendo gravado; os erros de grupos que faltam abaixo são consequência disso.`, 'Gere o TX2 de novo pelo sistema. Se ele sempre sai cortado no mesmo ponto, o problema está no dado do campo seguinte (cadastro) ou na rotina de geração.'));
+  }
   return notes;
 }
 
@@ -149,11 +157,11 @@ export function buildFromTx2(note: Tx2Note, dict: Dict): BuildResult {
     const isItem = ITEM_LETTERS.test(f.letters);
     // autXML aparece com a numeração antiga do leiaute (G50-G52) em alguns geradores de TX2
     const g = f.letters === 'G' && f.idNum >= 50 ? 'autXML' : GROUP[f.letters];
-    const pool = (f.tag === 'Id' || f.tag === 'versao' || f.tag === 'nItem') ? dict.byName.get('@' + f.tag) ?? [] : dict.byName.get(f.tag) ?? [];
+    const pool = (f.tag === 'Id' || f.tag === 'versao' || f.tag === 'nItem') ? dict.byName.get('@' + f.tag) ?? [] : [...(dict.byName.get(f.tag) ?? []), ...(dict.byName.get('@' + f.tag) ?? [])];
     let c = pool.filter((n) => n.path.startsWith(infPath + '/') || n.path.startsWith(infPath + '/@'));
     if (g !== undefined) {
       const pre = g ? `${infPath}/${g}/` : `${infPath}/`;
-      const inGroup = c.filter((n) => n.path.startsWith(pre) || (g && n.path === `${infPath}/${g}/@${f.tag}`));
+      const inGroup = c.filter((n) => n.path.startsWith(pre) || (!!g && n.path === `${infPath}/${g}/@${f.tag}`));
       if (inGroup.length) c = inGroup;
       else if (g === '' ) c = c.filter((n) => n.path === `${infPath}/@${f.tag}`);
       else c = []; // a letra diz um grupo e a tag não existe nele
@@ -166,7 +174,11 @@ export function buildFromTx2(note: Tx2Note, dict: Dict): BuildResult {
   // --- separa por escopo (nota / item) ---
   const scopes = new Map<string, Placed[]>();
   const empties: BuildResult['empties'] = [];
-  for (const f of note.fields) {
+  const trimmed: Tx2Field[] = [];
+  for (const f0 of note.fields) {
+    // o componente de emissão remove espaços no início e no fim dos valores (visto comparando TX2 com o XML autorizado)
+    const f = { ...f0, value: f0.value.trim() };
+    if (f.value !== f0.value && f.value !== '') trimmed.push(f0);
     const isItem = ITEM_LETTERS.test(f.letters);
     if (isItem && f.item === undefined) {
       problems.push({ sev: 'erro', origin: 'estrutura', title: `Campo de item fora de INCLUIRITEM: ${f.field}`, message: 'Campos dos grupos de produto e impostos precisam estar entre INCLUIRITEM e SALVARITEM.', line: f.line, tx2Field: f.field, fix: { text: 'Mova a linha para dentro do bloco do item.' } });
@@ -174,7 +186,8 @@ export function buildFromTx2(note: Tx2Note, dict: Dict): BuildResult {
     }
     const cands = candidates(f);
     if (!cands.length) { ignored.push({ line: f.line, field: f.field }); continue; }
-    if (f.value === '') { empties.push({ f, cands }); continue; }
+    // campo vazio: o componente omite a tag, a não ser que o leiaute aceite vazio (ex.: cBenef vazio sai <cBenef></cBenef>)
+    if (f.value === '' && !(cands.length === 1 && cands[0].f && valueOk('', cands[0].f))) { empties.push({ f, cands }); continue; }
     const key = isItem ? 'item' + f.item : 'nota';
     if (!scopes.has(key)) scopes.set(key, []);
     scopes.get(key)!.push({ f, cands });
@@ -182,6 +195,45 @@ export function buildFromTx2(note: Tx2Note, dict: Dict): BuildResult {
 
   // --- escolha de ramos (xs:choice) por escopo ---
   for (const [, placed] of scopes) resolveChoices(placed, dict);
+
+  // --- grupos que se repetem sem índice no TX2 ---
+  // dup: nDup_Y08 / dVenc_Y09 / vDup_Y10 repetidos em sequência = uma duplicata por bloco
+  // autXML: CNPJ_G51_1 e CPF_G52_1 = dois autorizados (o grupo só aceita um dos dois)
+  const nearestRepOf = (dn: DNode): DNode | undefined => {
+    let r: DNode | undefined;
+    for (let c: DNode | undefined = dn; c && c.path !== infPath; c = c.parent) if (!r && maxOf(c) > 1 && c.path !== infPath + '/det') r = c;
+    return r;
+  };
+  const singleChoice = (n: DNode) => n.c?.length === 1 && !!(n.c[0] as Group).ch && (n.c[0] as Group).ch!.every((x) => (x as DNode).n !== undefined && !(x as DNode).c?.length);
+  for (const [, placed] of scopes) {
+    const state = new Map<string, { inst: number; seen: Set<string> }>();
+    const choiceCount = new Map<string, number>();
+    const ordered = [...placed].sort((a, b) => a.f.line - b.f.line);
+    const choiceFields = ordered.filter((p) => { const r = nearestRepOf(p.cands[0]); return r && singleChoice(r) && !p.f.part; }).sort((a, b) => cmpId(a.f, b.f) || a.f.line - b.f.line);
+    for (const p of choiceFields) {
+      const r = nearestRepOf(p.cands[0])!;
+      const n = (choiceCount.get(r.path) ?? 0) + 1;
+      choiceCount.set(r.path, n);
+      p.f.idx = n;
+    }
+    for (const p of ordered) {
+      const r = nearestRepOf(p.cands[0]);
+      if (!r || singleChoice(r) || p.f.idx !== undefined || p.f.part) continue;
+      const st = state.get(r.path) ?? { inst: 1, seen: new Set<string>() };
+      if (st.seen.has(p.cands[0].path)) { st.inst++; st.seen = new Set(); }
+      st.seen.add(p.cands[0].path);
+      state.set(r.path, st);
+      if (st.inst > 1) p.f.idx = st.inst;
+    }
+  }
+  if (trimmed.length) {
+    problems.push({
+      sev: 'info', origin: 'estrutura',
+      title: `Espaço no início ou no fim de ${trimmed.length} campo${trimmed.length > 1 ? 's' : ''}`,
+      message: `${trimmed.slice(0, 6).map((t) => t.field).join(', ')}${trimmed.length > 6 ? '...' : ''}. O componente de emissão remove esses espaços ao gerar o XML, então não causam rejeição; o validador também desconsidera.`,
+      line: trimmed[0].line, tx2Field: trimmed[0].field,
+    });
+  }
   // empties: só para explicar; mesmo filtro de ramos não é necessário
 
   // --- duplicados ---

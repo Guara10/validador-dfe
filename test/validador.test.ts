@@ -78,7 +78,9 @@ describe('TX2', () => {
     expect(fix('CEP_E13')).toBe('99010000');
     expect(fix('NCM_I05')).toBe('10059010');
     expect(fix('vProd_I11')).toBe('1500.00');
-    expect(fix('xProd_I04')).toBe('MILHO EM GRAOS');
+    // espaço no fim: o componente remove ao gerar o XML, então é só informação
+    expect(a.findings.some((f) => f.tx2Field === 'xProd_I04' && f.sev === 'erro')).toBe(false);
+    expect(a.findings.find((f) => /^Espaço no início ou no fim/.test(f.title))?.sev).toBe('info');
     // valor inválido no item não pode gerar diferença falsa no total
     expect(a.findings.some((f) => f.code === '564')).toBe(false);
   });
@@ -108,6 +110,19 @@ describe('TX2 com numeração antiga', () => {
     expect(a.schemaOk).toBe(true);
     expect(a.generatedXml).toContain('<autXML>');
     expect(a.generatedXml).not.toContain('<entrega>');
+  });
+});
+
+describe('929 por UF', () => {
+  const rs = ex('nfe-valida.tx2').replace('CST_N12=00', 'CST_N12=51');
+  it('RS autoriza CST 51 sem pRedBC/pDif: sem aviso', async () => {
+    const a = (await analyze(rs, eng))[0];
+    expect(a.findings.some((f) => f.code === '929')).toBe(false);
+  });
+  it('outras UFs (fora PR e RS): só informação', async () => {
+    const sc = rs.replace('UF_C12=RS', 'UF_C12=SC').replace('cUF_B02=43', 'cUF_B02=42').replace('UF_E12=RS', 'UF_E12=SC').replace('cMunFG_B12=4310207', 'cMunFG_B12=4205407').replace('cMun_C10=4310207', 'cMun_C10=4205407').replace('cMun_E10=4314100', 'cMun_E10=4205407');
+    const a = (await analyze(sc, eng))[0];
+    expect(a.findings.find((f) => f.code === '929')?.sev).toBe('info');
   });
 });
 
@@ -171,7 +186,10 @@ describe('posição da tag que falta', () => {
     expect(lines[t.afterLine]).toMatch(/^vItem_VB01=/);
   });
   it('929: pDif e pRedBC calculados com os valores do grupo', async () => {
+    // 929 vale para o PR (o RS autoriza sem pRedBC/pDif)
     const base = ex('nfe-valida.tx2')
+      .replace('cUF_B02=43', 'cUF_B02=41').replace('cMunFG_B12=4310207', 'cMunFG_B12=4106902').replace('cMun_C10=4310207', 'cMun_C10=4106902').replace('UF_C12=RS', 'UF_C12=PR')
+      .replace('cMun_E10=4314100', 'cMun_E10=4108304').replace('UF_E12=RS', 'UF_E12=PR')
       .replace('CST_N12=00', 'CST_N12=51')
       .replace('vICMS_N17=180.00', 'vICMSOp_N16a=180.00\nvICMSDif_N16c=180.00\nvICMS_N17=0.00')
       .replace('vICMS_W04=318.00', 'vICMS_W04=138.00');

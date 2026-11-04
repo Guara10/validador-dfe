@@ -15,6 +15,7 @@ const EXAMPLE_LABELS: [string, string][] = [
   ['erro-225-caractere-invalido.tx2', 'TX2 · 225 caractere inválido no nome'],
   ['erro-1080-item-sem-ibscbs.tx2', 'TX2 · 1080 item sem IBS/CBS'],
   ['erro-929-cst51-sem-predbc.tx2', 'TX2 · 929 CST 51 sem pRedBC'],
+  ['erro-devolucao-referencia.tx2', 'TX2 · devolução (547 e 327)'],
   ['erro-calculos.tx2', 'TX2 · totais e cálculos'],
   ['erro-formatos.tx2', 'TX2 · formatos (vírgula, CEP, NCM)'],
   ['erro-schema-variados.xml', 'XML · vários erros de schema'],
@@ -35,7 +36,11 @@ const REJ: Record<string, string> = {
   '1084': 'Total do IBS do município difere da soma dos itens',
   '1085': 'Total do IBS difere da soma dos itens',
   '1091': 'Total da CBS difere da soma dos itens',
+  '321': 'NF-e de devolução sem documento fiscal referenciado',
+  '327': 'CFOP inválido para NF-e com finalidade de devolução',
+  '328': 'CFOP de devolução em NF-e que não é de devolução',
   '502': 'Chave de acesso não corresponde aos campos',
+  '547': 'Dígito verificador da chave referenciada inválido',
   '508': 'CST incompatível com não contribuinte',
   '518': 'CFOP de entrada em NF-e de saída',
   '519': 'CFOP de saída em NF-e de entrada',
@@ -163,7 +168,11 @@ async function run() {
   S.error = undefined;
   render();
   try {
-    S.results = await analyze(S.text, getEngine());
+    // exemplos são validados na data em que foram "emitidos", para não virarem 228 com o tempo
+    const eng = getEngine();
+    const dh = S.example ? /(?:dhEmi_B09=|<dhEmi>)(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2})/.exec(S.text)?.[1] : undefined;
+    eng.now = dh ? () => new Date(Date.parse(dh) + 3600000) : undefined;
+    S.results = await analyze(S.text, eng);
     if (S.note >= S.results.length) S.note = 0;
     // análise de XML devolve o texto formatado: passa a ser a base das correções
     const a = S.results[0];
@@ -273,13 +282,14 @@ function summaryBlock(a: Analysis) {
   const warnCodes = [...new Set(warns.map((f) => f.code).filter(Boolean))] as string[];
   const modelo = s.modelo === '65' ? 'NFC-e' : 'NF-e';
   let verdict: HTMLElement;
-  if (a.fatal) verdict = h('div', { class: 'v bad' }, 'Arquivo ilegível');
+  if (a.unsupported) verdict = h('div', { class: 'v warn' }, 'Documento não validado');
+  else if (a.fatal) verdict = h('div', { class: 'v bad' }, 'Arquivo ilegível');
   else if (errs.length) verdict = h('div', { class: 'v bad' }, codes.length ? 'Provável rejeição' : `${errs.length} erro${errs.length > 1 ? 's' : ''} encontrado${errs.length > 1 ? 's' : ''}`);
   else if (warns.length) verdict = h('div', { class: 'v warn' }, 'Sem erros de schema ou de conta; confira os avisos');
   else verdict = h('div', { class: 'v good' }, 'Nenhum problema encontrado');
   return h('section', { class: 'summary', 'aria-label': 'Resumo da nota' },
     h('div', { class: 'doc-id' },
-      h('div', { class: 't' }, s.numero ? `${modelo} ${s.numero} · série ${s.serie ?? '?'}` : S.fileName ?? 'Documento',
+      h('div', { class: 't' }, a.unsupported ? `Modelo ${s.modelo}${s.numero ? ` · nº ${s.numero}` : ''}` : s.numero ? `${modelo} ${s.numero} · série ${s.serie ?? '?'}` : S.fileName ?? 'Documento',
         s.tpAmb === '2' ? h('span', { class: 'amb' }, 'Homologação') : null,
         s.autorizada ? h('span', { class: 'amb', style: 'background:var(--ok-bg);color:var(--ok)' }, 'Autorizada') : null),
       s.emitente || s.destinatario ? h('div', { class: 'p' }, [s.emitente, s.destinatario].filter(Boolean).join('  →  ')) : null,

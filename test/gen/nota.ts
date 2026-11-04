@@ -62,6 +62,8 @@ export interface GenNote {
   ibs: boolean;
   ibsFormula: 'item' | 'item-icms';
   crt: '1' | '3';
+  fin: '1' | '4';
+  ref?: 'refNFe' | 'refNFP';
 }
 
 const UFS = [
@@ -110,14 +112,19 @@ export interface GenOptions {
   csts?: string[]; // ordem dos CST/CSOSN dos itens
   interestadual?: boolean;
   pf?: boolean;
+  /** '4' = devolução (CFOP x202, NFref com a nota original, às vezes impostoDevol) */
+  fin?: '1' | '4';
+  /** documento referenciado numa nota normal */
+  ref?: 'refNFe' | 'refNFP' | 'none';
 }
 
 export function genNote(seed: number, opt: GenOptions = {}): GenNote {
   const r = rng(seed);
   const E = r.pick(UFS);
-  const crt = opt.crt ?? (r.chance(0.3) ? '1' : '3');
+  const fin = opt.fin ?? (r.chance(0.15) ? '4' : '1');
+  const crt = fin === '4' ? '3' : opt.crt ?? (r.chance(0.3) ? '1' : '3');
   const inter = opt.interestadual ?? r.chance(0.25);
-  const pf = opt.pf ?? (!inter && r.chance(0.3));
+  const pf = fin === '4' ? false : opt.pf ?? (!inter && r.chance(0.3));
   const D = inter ? r.pick(DEST_UF) : { uf: E.uf, mun: E.mun, xMun: E.xMun, cep: E.cep };
   const ibs = opt.ibs ?? r.chance(0.7);
   const ibsFormula: GenNote['ibsFormula'] = r.chance(0.5) ? 'item' : 'item-icms';
@@ -139,6 +146,15 @@ export function genNote(seed: number, opt: GenOptions = {}): GenNote {
     tpNF: '1', idDest, cMunFG: E.mun, tpImp: '1', tpEmis, cDV: chave[43], tpAmb: '2', finNFe: '1',
     indFinal, indPres: '1', indIntermed: '0', procEmi: '0', verProc: 'GERADOR-TESTE 1.0',
   };
+  // documento referenciado: devolução sempre referencia a nota original; nota normal às vezes
+  const refKind = fin === '4' ? 'refNFe' : opt.ref === 'none' ? undefined : opt.ref ?? (r.chance(0.2) ? r.pick(['refNFe', 'refNFP'] as const) : undefined);
+  const origKey = (() => {
+    const c = r.pick(['43', '41', '35']) + '2609' + cnpjDV(digits(r, 8) + '0001') + '55' + '001' + String(r.int(1, 999999)).padStart(9, '0') + '1' + String(r.int(10000000, 99999999));
+    return c + dvChave(c);
+  })();
+  if (refKind === 'refNFe') ide.NFref = [{ refNFe: origKey }];
+  if (refKind === 'refNFP') ide.NFref = [{ refNFP: { cUF: E.c, AAMM: '2609', CPF: cpfDV(digits(r, 9)), IE: digits(r, 10), mod: '04', serie: '0', nNF: String(r.int(1, 99999)) } }];
+  if (fin === '4') { ide.natOp = 'DEVOLUCAO DE COMPRA'; ide.finNFe = '4'; }
   const emit: MGroup = {
     CNPJ: cnpjEmit, xNome: 'EMPRESA TESTE ' + digits(r, 3) + ' LTDA',
     enderEmit: { xLgr: 'RUA DO COMERCIO', nro: String(r.int(1, 9999)), xBairro: 'CENTRO', cMun: E.mun, xMun: E.xMun, UF: E.uf, CEP: E.cep, cPais: '1058', xPais: 'BRASIL', fone: '55' + digits(r, 8) },
@@ -148,7 +164,7 @@ export function genNote(seed: number, opt: GenOptions = {}): GenNote {
     ? { CPF: cpfDV(digits(r, 9)), xNome: 'CONSUMIDOR TESTE', enderDest: { xLgr: 'RUA A', nro: '10', xBairro: 'CENTRO', cMun: D.mun, xMun: D.xMun, UF: D.uf, CEP: D.cep, cPais: '1058', xPais: 'BRASIL' }, indIEDest: '9' }
     : { CNPJ: cnpjDV(digits(r, 8) + '0001'), xNome: 'CLIENTE TESTE ' + digits(r, 3) + ' LTDA', enderDest: { xLgr: 'AV BRASIL', nro: String(r.int(1, 999)), xBairro: 'INDUSTRIAL', cMun: D.mun, xMun: D.xMun, UF: D.uf, CEP: D.cep, cPais: '1058', xPais: 'BRASIL' }, indIEDest: '1', IE: digits(r, 10) };
 
-  const cstPool = crt === '1' ? ['102', '101', '500'] : pf ? ['00', '20', '40', '60'] : ['00', '20', '10', '40', '51', '60'];
+  const cstPool = crt === '1' ? ['102', '101', '500'] : pf ? ['00', '20', '40', '60'] : fin === '4' ? ['00', '20', '40'] : ['00', '20', '10', '40', '51', '60'];
   const dets: MGroup[] = [];
   const items: ItemInfo[] = [];
   for (let i = 0; i < nItems; i++) {
@@ -161,7 +177,7 @@ export function genNote(seed: number, opt: GenOptions = {}): GenNote {
     const vOutro = r.chance(0.15) ? r.int(100, 2000) / 100 : 0;
     const vDesc = r.chance(0.3) ? Math.min(r2(vProd * 0.1), r.int(1, 3000) / 100) : 0;
     const value = r2(vProd - vDesc + vFrete + vSeg + vOutro);
-    const cfop = (inter ? '6' : '5') + (crt === '1' ? '102' : '102');
+    const cfop = (inter ? '6' : '5') + (fin === '4' ? '202' : '102');
     const prod: MGroup = {
       cProd: String(1000 + i), cEAN: 'SEM GTIN', xProd, NCM, CFOP: cfop, uCom, qCom: f4(qCom), vUnCom: vUn.toFixed(4), vProd: f2(vProd),
       cEANTrib: 'SEM GTIN', uTrib: uCom, qTrib: f4(qCom), vUnTrib: vUn.toFixed(4),
@@ -236,7 +252,13 @@ export function genNote(seed: number, opt: GenOptions = {}): GenNote {
       info.ibsBase = base;
       (info as any).vIBSUF = vUF; (info as any).vCBS = vCBS;
     }
-    dets.push({ '@nItem': String(i + 1), prod, imposto });
+    const detM: MGroup = { '@nItem': String(i + 1), prod, imposto };
+    if (fin === '4' && r.chance(0.5)) {
+      const vIPIDevol = r2(value * 0.05);
+      detM.impostoDevol = { pDevol: '100.00', IPI: { vIPIDevol: f2(vIPIDevol) } };
+      (info as any).vIPIDevol = vIPIDevol;
+    }
+    dets.push(detM);
     items.push(info);
   }
 
@@ -245,12 +267,12 @@ export function genNote(seed: number, opt: GenOptions = {}): GenNote {
   const pv = (k: string) => (d: MGroup) => +(((d.prod as MGroup)[k] as string | undefined) ?? 0);
   const SD = (fn: (d: MGroup) => number) => r2(dets.reduce((a, d) => a + Math.round(fn(d) * 100), 0) / 100);
   const vProd = SD(pv('vProd')), vFrete = SD(pv('vFrete')), vSeg = SD(pv('vSeg')), vDesc = SD(pv('vDesc')), vOutro = SD(pv('vOutro'));
-  const vST = S((i) => i.vST), vIPI = S((i) => i.vIPI);
-  const vNF = r2(vProd - vDesc + vST + vFrete + vSeg + vOutro + vIPI);
+  const vST = S((i) => i.vST), vIPI = S((i) => i.vIPI), vIPIDevol = S((i) => (i as any).vIPIDevol ?? 0);
+  const vNF = r2(vProd - vDesc + vST + vFrete + vSeg + vOutro + vIPI + vIPIDevol);
   const ICMSTot: MGroup = {
     vBC: f2(S((i) => i.vBC ?? 0)), vICMS: f2(S((i) => i.vICMS)), vICMSDeson: '0.00', vFCP: '0.00',
     vBCST: f2(S((i) => (i as any).vBCST ?? 0)), vST: f2(vST), vFCPST: '0.00', vFCPSTRet: '0.00',
-    vProd: f2(vProd), vFrete: f2(vFrete), vSeg: f2(vSeg), vDesc: f2(vDesc), vII: '0.00', vIPI: f2(vIPI), vIPIDevol: '0.00',
+    vProd: f2(vProd), vFrete: f2(vFrete), vSeg: f2(vSeg), vDesc: f2(vDesc), vII: '0.00', vIPI: f2(vIPI), vIPIDevol: f2(vIPIDevol),
     vPIS: f2(S((i) => i.vPIS)), vCOFINS: f2(S((i) => i.vCOFINS)), vOutro: f2(vOutro), vNF: f2(vNF),
   };
   const total: MGroup = { ICMSTot };
@@ -294,7 +316,7 @@ export function genNote(seed: number, opt: GenOptions = {}): GenNote {
     infAdic: { infCpl: 'NOTA GERADA PARA TESTE AUTOMATIZADO; SEM VALOR FISCAL.' },
     infRespTec: { CNPJ: '12345678000195', xContato: 'SUPORTE TESTE', email: 'suporte@exemplo.com.br', fone: '5533330000' },
   };
-  return { model, chave, items, uf: E.uf, ibs, ibsFormula, crt };
+  return { model, chave, items, uf: E.uf, ibs, ibsFormula, crt, fin, ref: refKind };
 }
 
 /* ------------------------------------------------------------------ */
@@ -337,6 +359,9 @@ const IDS: Record<string, string> = {
   'enderDest/cMun': 'E10', 'enderDest/xMun': 'E11', 'enderDest/UF': 'E12', 'enderDest/CEP': 'E13', 'enderDest/cPais': 'E14', 'enderDest/xPais': 'E15',
   'dest/indIEDest': 'E16a', 'dest/IE': 'E17',
   'det/@nItem': 'H02',
+  'NFref/refNFe': 'BA02', 'refNFP/cUF': 'BA11', 'refNFP/AAMM': 'BA12', 'refNFP/CNPJ': 'BA13', 'refNFP/CPF': 'BA14', 'refNFP/IE': 'BA15',
+  'refNFP/mod': 'BA16', 'refNFP/serie': 'BA17', 'refNFP/nNF': 'BA18',
+  'impostoDevol/pDevol': 'UA02', 'IPI/vIPIDevol': 'UA04',
   'prod/cProd': 'I02', 'prod/cEAN': 'I03', 'prod/xProd': 'I04', 'prod/NCM': 'I05', 'prod/CFOP': 'I08', 'prod/uCom': 'I09', 'prod/qCom': 'I10',
   'prod/vUnCom': 'I10a', 'prod/vProd': 'I11', 'prod/cEANTrib': 'I12', 'prod/uTrib': 'I13', 'prod/qTrib': 'I14', 'prod/vUnTrib': 'I14a',
   'prod/vFrete': 'I15', 'prod/vSeg': 'I16', 'prod/vDesc': 'I17', 'prod/vOutro': 'I17a', 'prod/indTot': 'I17b',

@@ -94,6 +94,14 @@ export async function analyzeTx2(text: string, eng: Engine): Promise<Analysis[]>
   }
   const out: Analysis[] = [];
   for (const note of notes) {
+    // o mesmo formato de TX2 é usado para nota de serviço (modelo 98/00 no sistema): fora do escopo do validador
+    const modF = note.fields.find((f) => f.tag === 'mod' && f.letters === 'B');
+    if (modF && !['55', '65'].includes(modF.value.trim())) {
+      const nat = note.fields.find((f) => f.tag === 'natOp')?.value.trim();
+      const msg = `Este TX2 é do modelo ${modF.value.trim()}${nat ? ` (${nat})` : ''}, não de NF-e (55) ou NFC-e (65). Nota de serviço tem leiaute próprio e não é validada aqui.`;
+      out.push({ kind: 'tx2', source: text, findings: [{ sev: 'info', origin: 'estrutura', title: 'Documento fora do escopo do validador', message: msg, line: modF.line, tx2Field: modF.field }], summary: { modelo: modF.value.trim(), numero: note.fields.find((f) => f.tag === 'nNF')?.value.trim() }, schemaOk: false, fatal: msg, unsupported: true });
+      continue;
+    }
     const b = buildFromTx2(note, eng.dict);
     const { text: xml, byLine } = formatXml(b.root, { fromValues: true });
     const raw = await eng.runner.validate(xml, eng.schemas.entry.NFe);
@@ -102,7 +110,13 @@ export async function analyzeTx2(text: string, eng: Engine): Promise<Analysis[]>
       tx2Empty: makeEmptyLookup(b),
       tx2GroupLine: (n: XNode) => n.tx2Line,
     };
-    const tr = translateXsdErrors(raw, tctx).filter((f) => !(f.title === 'XML sem assinatura digital'));
+    let tr = translateXsdErrors(raw, tctx).filter((f) => !(f.title === 'XML sem assinatura digital'));
+    // nota sem itens: um aviso claro no lugar de "falta uma destas tags <retirada>, <entrega>, <autXML>, <det>"
+    const semItens = !b.root.children[0]?.children.some((c) => c.name === 'det');
+    if (semItens) {
+      tr = tr.filter((f) => !(f.origin === 'schema' && /<det>/.test(f.title)));
+      if (!note.incomplete) tr.push({ sev: 'erro', origin: 'estrutura', code: '225', title: 'Nota sem itens', message: 'O TX2 não tem nenhum bloco INCLUIRITEM ... SALVARITEM. Toda NF-e precisa de pelo menos um item.', line: note.endLine, fix: { text: 'Confira se a nota tem produtos lançados no sistema e gere o TX2 de novo.' } });
+    }
     tr.push(...sweepTree(b.root, tctx, tr));
     const findings: Finding[] = [...b.problems, ...tr];
     findings.push(...runNfeRules(b.root, { lineOf: (n) => n?.tx2Line, fieldOf: (n) => n?.tx2Field, now: eng.now?.(), dict: eng.dict }));

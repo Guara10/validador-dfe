@@ -111,4 +111,6 @@ export interface Analysis {
   ignoredTx2?: { line: number; field: string }[];
   schemaOk: boolean;
   fatal?: string;
+  /** documento que o validador não cobre (ex.: TX2 de nota de serviço) */
+  unsupported?: boolean;
 }

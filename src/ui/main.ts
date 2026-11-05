@@ -1,4 +1,5 @@
 import './style.css';
+import { REJ_MOC } from '../core/rej';
 import type { Analysis, Finding, Ghost } from '../core/types';
 import { analyze, type Engine } from '../core/analyze';
 import { nfeDict, nfeSchemas } from '../core/engine-data';
@@ -27,6 +28,7 @@ const examples = new Map<string, string>();
 for (const [path, txt] of Object.entries(rawExamples)) examples.set(path.split('/').pop()!, txt);
 
 const REJ: Record<string, string> = {
+  ...REJ_MOC,
   '225': 'Falha no schema XML',
   '228': 'Data de emissão muito atrasada',
   '506': 'Data de saída menor que a data de emissão',

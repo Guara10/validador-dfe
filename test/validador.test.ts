@@ -202,7 +202,7 @@ describe('posição da tag que falta', () => {
   it('XML: natOp entra entre cNF e mod', async () => {
     const a = await run('erro-schema-variados.xml');
     const g = a.findings.find((x) => x.title.includes('<natOp>'))!.ghosts![0];
-    expect(lineAt(a.source, g.afterLine)).toBe('<cNF>12345678</cNF>');
+    expect(lineAt(a.source, g.afterLine)).toBe('<cNF>48213765</cNF>');
     expect(lineAt(a.source, g.afterLine + 1)).toBe('<mod>55</mod>');
   });
 });

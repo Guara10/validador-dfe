@@ -47,7 +47,8 @@ export function mutationsFor(g: GenNote): Mutation[] {
   // --- item x total ---
   M.push({
     name: 'vProd do item errado (total certo)', apply: (x) => { prod(x, k).vProd = add(prod(x, k).vProd as string, 0.37); },
-    match: (f) => f.code === '629', tag: 'vProd', fix: prod(m, k).vProd as string, roundTrip: 'value',
+    // 629 é só para finNFe=1; na devolução a rejeição é a do total (564), apontada no item
+    match: (f) => f.code === ((m.ide as any).finNFe === '1' ? '629' : '564') && /^vProd diferente/.test(f.title), tag: 'vProd', fix: prod(m, k).vProd as string, roundTrip: 'value',
     forbid: (f) => /^Total vProd|^Total da nota/.test(f.title),
   });
   M.push({

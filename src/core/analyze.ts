@@ -4,6 +4,7 @@ import { parseXml, XmlSyntaxError, child, descendants, select } from './xml/pars
 import { formatXml } from './xml/format';
 import { translateXsdErrors, sweepTree, type RawXsdError } from './xsd/translate';
 import { runNfeRules, summarize } from './rules/nfe';
+import { runMocRules } from './rules/moc';
 import { looksLikeTx2, parseTx2, buildFromTx2, makeEmptyLookup, tx2GhostFrom } from './tx2/tx2';
 
 /** Executa o xmllint (wasm) — implementado para navegador e para Node (testes). */
@@ -74,7 +75,7 @@ export async function analyzeXml(text: string, eng: Engine): Promise<Analysis[]>
   return nfes.map((nfe, i) => {
     const mine = schemaFindings.filter((f) => inNote(f, nfe) || (i === 0 && !nfes.some((n) => inNote(f, n))));
     const findings: Finding[] = [...common, ...mine];
-    findings.push(...runNfeRules(nfe, { lineOf: (n) => n?.fmtLine, fieldOf: () => undefined, now: eng.now?.(), dict: eng.dict, autorizada }));
+    { const ctx = { lineOf: (n: any) => n?.fmtLine, fieldOf: () => undefined, now: eng.now?.(), dict: eng.dict, autorizada }; findings.push(...runNfeRules(nfe, ctx), ...runMocRules(nfe, ctx)); }
     if (child(nfe, 'Signature') && !autorizada) {
       findings.push({ sev: 'info', origin: 'estrutura', title: 'XML já assinado', message: 'Qualquer correção feita neste arquivo invalida a assinatura digital. Use o validador para achar o problema, corrija no sistema e gere/assine a nota de novo.', line: child(nfe, 'Signature')!.fmtLine });
     }
@@ -119,7 +120,7 @@ export async function analyzeTx2(text: string, eng: Engine): Promise<Analysis[]>
     }
     tr.push(...sweepTree(b.root, tctx, tr));
     const findings: Finding[] = [...b.problems, ...tr];
-    findings.push(...runNfeRules(b.root, { lineOf: (n) => n?.tx2Line, fieldOf: (n) => n?.tx2Field, now: eng.now?.(), dict: eng.dict }));
+    { const ctx = { lineOf: (n: any) => n?.tx2Line, fieldOf: (n: any) => n?.tx2Field, now: eng.now?.(), dict: eng.dict }; findings.push(...runNfeRules(b.root, ctx), ...(note.incomplete ? [] : runMocRules(b.root, ctx))); }
     // campos vazios em grupos que foram gerados: aviso leve (podem virar tag vazia dependendo do componente)
     const schemaOk = !tr.some((f) => f.sev === 'erro');
     if (b.idGenerated) {

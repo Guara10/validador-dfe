@@ -83,9 +83,12 @@ describe('ajustes por evidência das notas autorizadas', () => {
     const a = await run(t);
     expect(a.findings.find((f) => /^Pagamentos menores/.test(f.title))?.sev).toBe('info');
   });
-  it('duplicatas que começam na parcela 002 (entrada à vista) são informação', async () => {
+  it('duplicatas que começam na parcela 002 (entrada à vista): 851 continua erro (MOC Y10-10), com a dica da entrada', async () => {
     const a = await run(TX2.replace('nDup_Y08=001\ndVenc_Y09=2026-11-27\nvDup_Y10=2650.00', 'nDup_Y08=002\ndVenc_Y09=2026-11-27\nvDup_Y10=1325.00'));
-    expect(a.findings.find((f) => /duplicatas/.test(f.title))?.sev).toBe('info');
+    const f = a.findings.find((x) => /duplicatas/.test(x.title))!;
+    expect(f.sev).toBe('erro');
+    expect(f.code).toBe('851');
+    expect(f.message).toMatch(/entrada/);
   });
   it('qrCode da NFC-e versão 3 (padrões alternativos do XSD) não é acusado', async () => {
     const { nfeDict: d } = await import('../src/core/engine-data');

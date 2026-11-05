@@ -102,6 +102,8 @@ function cpfDV(base9: string): string {
   const d1 = calc(base9);
   return base9 + d1 + calc(base9 + d1);
 }
+/** em homologação (tpAmb=2) a SEFAZ exige este nome no destinatário (rejeição 598) */
+export const HOMOLOG = 'NF-E EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL';
 const digits = (r: R, n: number) => Array.from({ length: n }, () => r.int(0, 9)).join('');
 
 export interface GenOptions {
@@ -161,10 +163,10 @@ export function genNote(seed: number, opt: GenOptions = {}): GenNote {
     IE: digits(r, 10), CRT: crt,
   };
   const dest: MGroup = pf
-    ? { CPF: cpfDV(digits(r, 9)), xNome: 'CONSUMIDOR TESTE', enderDest: { xLgr: 'RUA A', nro: '10', xBairro: 'CENTRO', cMun: D.mun, xMun: D.xMun, UF: D.uf, CEP: D.cep, cPais: '1058', xPais: 'BRASIL' }, indIEDest: '9' }
-    : { CNPJ: cnpjDV(digits(r, 8) + '0001'), xNome: 'CLIENTE TESTE ' + digits(r, 3) + ' LTDA', enderDest: { xLgr: 'AV BRASIL', nro: String(r.int(1, 999)), xBairro: 'INDUSTRIAL', cMun: D.mun, xMun: D.xMun, UF: D.uf, CEP: D.cep, cPais: '1058', xPais: 'BRASIL' }, indIEDest: '1', IE: digits(r, 10) };
+    ? { CPF: cpfDV(digits(r, 9)), xNome: HOMOLOG, enderDest: { xLgr: 'RUA A', nro: '10', xBairro: 'CENTRO', cMun: D.mun, xMun: D.xMun, UF: D.uf, CEP: D.cep, cPais: '1058', xPais: 'BRASIL' }, indIEDest: '9' }
+    : { CNPJ: cnpjDV(digits(r, 8) + '0001'), xNome: (digits(r, 3), HOMOLOG), enderDest: { xLgr: 'AV BRASIL', nro: String(r.int(1, 999)), xBairro: 'INDUSTRIAL', cMun: D.mun, xMun: D.xMun, UF: D.uf, CEP: D.cep, cPais: '1058', xPais: 'BRASIL' }, indIEDest: '1', IE: digits(r, 10) };
 
-  const cstPool = crt === '1' ? ['102', '101', '500'] : pf ? ['00', '20', '40', '60'] : fin === '4' ? ['00', '20', '40'] : ['00', '20', '10', '40', '51', '60'];
+  const cstPool = crt === '1' ? (pf ? ['102', '500'] : ['102', '101', '500']) : pf ? ['00', '20', '40', '60'] : fin === '4' ? ['00', '20', '40'] : ['00', '20', '10', '40', '51', '60'];
   const dets: MGroup[] = [];
   const items: ItemInfo[] = [];
   for (let i = 0; i < nItems; i++) {
@@ -178,15 +180,17 @@ export function genNote(seed: number, opt: GenOptions = {}): GenNote {
     const vDesc = r.chance(0.3) ? Math.min(r2(vProd * 0.1), r.int(1, 3000) / 100) : 0;
     const value = r2(vProd - vDesc + vFrete + vSeg + vOutro);
     const cfop = (inter ? '6' : '5') + (fin === '4' ? '202' : '102');
+    const cst = opt.csts?.[i] ?? r.pick(cstPool);
+    // N23-10: item com ST precisa do CEST
+    const CEST = ['10', '30', '60', '70', '201', '202', '203', '500'].includes(cst) ? '0' + digits(r, 6) : undefined;
     const prod: MGroup = {
-      cProd: String(1000 + i), cEAN: 'SEM GTIN', xProd, NCM, CFOP: cfop, uCom, qCom: f4(qCom), vUnCom: vUn.toFixed(4), vProd: f2(vProd),
+      cProd: String(1000 + i), cEAN: 'SEM GTIN', xProd, NCM, CEST, CFOP: cfop, uCom, qCom: f4(qCom), vUnCom: vUn.toFixed(4), vProd: f2(vProd),
       cEANTrib: 'SEM GTIN', uTrib: uCom, qTrib: f4(qCom), vUnTrib: vUn.toFixed(4),
       vFrete: vFrete ? f2(vFrete) : undefined, vSeg: vSeg ? f2(vSeg) : undefined, vDesc: vDesc ? f2(vDesc) : undefined, vOutro: vOutro ? f2(vOutro) : undefined,
       indTot: '1',
     };
-    const cst = opt.csts?.[i] ?? r.pick(cstPool);
     const info: ItemInfo = { cst, value, vProd, vICMS: 0, vST: 0, vIPI: 0, vPIS: 0, vCOFINS: 0 };
-    const p = r.pick([7, 12, 17, 18, 19.5]);
+    const p = inter ? r.pick([4, 7]) : r.pick([7, 12, 17, 18, 19.5]);
     let icms: MGroup;
     switch (cst) {
       case '00': { const vICMS = r2((value * p) / 100); icms = { ICMS00: { orig: '0', CST: '00', modBC: '3', vBC: f2(value), pICMS: p.toFixed(2), vICMS: f2(vICMS) } }; Object.assign(info, { vICMS, vBC: value }); break; }
@@ -293,7 +297,11 @@ export function genNote(seed: number, opt: GenOptions = {}): GenNote {
   // cobrança e pagamento
   let cobr: MGroup | undefined;
   let pag: MGroup;
-  if (r.chance(0.5)) {
+  if (fin === '4') {
+    // YA02-? (871): devolução e ajuste usam tPag=90 (sem pagamento)
+    r.chance(0.5);
+    pag = { detPag: [{ tPag: '90', vPag: '0.00' }] };
+  } else if (r.chance(0.5)) {
     const n = r.int(1, 3);
     const parc = r2(Math.floor((vNF / n) * 100) / 100);
     const dups: MGroup[] = [];
@@ -362,7 +370,7 @@ const IDS: Record<string, string> = {
   'NFref/refNFe': 'BA02', 'refNFP/cUF': 'BA11', 'refNFP/AAMM': 'BA12', 'refNFP/CNPJ': 'BA13', 'refNFP/CPF': 'BA14', 'refNFP/IE': 'BA15',
   'refNFP/mod': 'BA16', 'refNFP/serie': 'BA17', 'refNFP/nNF': 'BA18',
   'impostoDevol/pDevol': 'UA02', 'IPI/vIPIDevol': 'UA04',
-  'prod/cProd': 'I02', 'prod/cEAN': 'I03', 'prod/xProd': 'I04', 'prod/NCM': 'I05', 'prod/CFOP': 'I08', 'prod/uCom': 'I09', 'prod/qCom': 'I10',
+  'prod/cProd': 'I02', 'prod/cEAN': 'I03', 'prod/xProd': 'I04', 'prod/NCM': 'I05', 'prod/CEST': 'I05c', 'prod/CFOP': 'I08', 'prod/uCom': 'I09', 'prod/qCom': 'I10',
   'prod/vUnCom': 'I10a', 'prod/vProd': 'I11', 'prod/cEANTrib': 'I12', 'prod/uTrib': 'I13', 'prod/qTrib': 'I14', 'prod/vUnTrib': 'I14a',
   'prod/vFrete': 'I15', 'prod/vSeg': 'I16', 'prod/vDesc': 'I17', 'prod/vOutro': 'I17a', 'prod/indTot': 'I17b',
   'ICMS/orig': 'N11', 'ICMS/CST': 'N12', 'ICMS/CSOSN': 'N12a', 'ICMS/modBC': 'N13', 'ICMS/pRedBC': 'N14', 'ICMS/vBC': 'N15', 'ICMS/pICMS': 'N16',

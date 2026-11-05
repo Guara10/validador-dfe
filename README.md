@@ -22,6 +22,10 @@ As contas são encadeadas: quando o total não fecha só porque um item está co
 
 **Coerência.** Chave de acesso contra os campos da nota (502) e dígito verificador (inclusive CNPJ alfanumérico), CFOP contra tipo e destino da operação (518, 519, 772, 773), devolução e documentos referenciados (321, 327, 328, 547, referência à própria chave), não contribuinte (508, 696), CST 51 sem `pRedBC`/`pDif` (929), item sem grupo IBS/CBS, prazos (228, 506, 703), fuso horário da UF, peso fora de escala, duplicatas e pagamentos que não fecham.
 
+**Regras do MOC (Anexo I).** Regras de validação do *Anexo I – Leiaute e Regras de Validação da NF-e e da NFC-e* que dá para conferir só com o arquivo, cada uma com o código oficial (`src/core/rules/moc.ts`, com o ID da regra no comentário): dígito verificador de CNPJ (numérico e alfanumérico) e CPF de emitente, destinatário, transportador, autorizados e intermediador (207, 208, 237, 323, 325, 401, 440, 542, 543); GTIN (611, 612, 883, 885, 886, 888); `cNF` proibido ou igual ao `nNF` (897); município de outra UF (271, 273, 275); nome do destinatário em homologação (598, com o texto exigido); indicador de IE (728, 790, 791, 720, 925); NF-e complementar (254, 255); chave referenciada inconsistente ou repetida (522, 524, 679, 683, 680); CEST em item com ST (806); FCP zerado (880, 881); CST/CSOSN com destinatário isento ou não contribuinte (529, 600); alíquota interestadual (693); partilha do ICMS (694, 695); intermediador (434, 438, 439); pagamento em devolução (871, 904) e troco (869); `nItem` fora de sequência (927); e as restrições da NFC-e (705–718, 736, 742, 743, 753–763, 774, 789, 807, 814, 857, 899). Regra "Obrig." vira erro; "Facul." (a critério da UF) ou com exceções que dependem de tabelas que o validador não tem vira aviso. A tabela de textos oficiais está em `src/core/rej.ts`.
+
+O Anexo I usado é a versão de 2020; o que foi mudado por NT depois e confirmado com notas autorizadas foi ajustado (por exemplo, a regra 435 do `indIntermed` não é aplicada).
+
 **Campos que faltam** aparecem encaixados na posição certa do arquivo enviado (linha `campo_ID=valor` no TX2, tag no XML). Quando o valor sai de conta com o próprio arquivo, ele já vem preenchido: `pRedBC` e `pDif` só quando o percentual é inteiro (com casas decimais, mais de um percentual fecha a mesma conta) e a base do IBS/CBS pela mesma regra que os outros itens da nota seguem.
 
 **O que ele não faz:** não consulta a SEFAZ (cadastro, situação da chave, regras próprias de cada UF) e **não sugere CST, cClassTrib, CFOP nem alíquota**. Correções de cálculo mostram o valor que fecha a conta com os demais campos; se o valor do arquivo estiver certo, o erro está em algum campo usado no cálculo.
@@ -31,7 +35,7 @@ As contas são encadeadas: quando o total não fecha só porque um item está co
 **Limitações conhecidas**
 - TX2 com grupos repetidos dentro de grupos repetidos (lacres de vários volumes, adições de várias DI) não é montado corretamente; aparece como "Campo repetido".
 - Códigos 1076, 1084, 1085 e 1091 (totais de IBS/CBS) vêm da tabela de rejeições da reforma e ainda não foram vistos em retorno real.
-- Regras específicas de cada UF não são conferidas (fora o 929 acima).
+- Regras específicas de cada UF não são conferidas (fora o 929 acima), nem as que dependem de cadastro da SEFAZ (situação do emitente, IE do destinatário, chave já usada).
 - A lista de CFOP de devolução cobre os mais usados da tabela oficial (indDevol=1); por isso 327/328 são avisos.
 - TX2 de nota de serviço (modelos 98/00 no mesmo formato) não é validado.
 
@@ -73,6 +77,7 @@ Para atualizar o leiaute: troque os XSDs em `schemas/nfe/` e rode `npm run schem
 
 - **Notas geradas** (`test/gen/nota.ts`): um gerador monta notas válidas com contas consistentes (Simples e regime normal, CST 00/10/20/40/51/60, CSOSN, ST, IPI tributado, PIS/COFINS por alíquota, IBS/CBS com e sem redução, frete, seguro, desconto, parcelas, pagamentos com troco, interestadual, consumidor final, fusos de UF diferentes) e escreve cada uma em XML e em TX2 de forma independente.
 - **Falso positivo:** nota válida não pode ter erro nem aviso, em XML formatado, XML numa linha só e TX2; e o XML montado do TX2 tem que ser idêntico ao XML gerado.
+- **Regras do MOC** (`test/moc.test.ts`): cada regra parte de uma nota gerada válida, planta uma única inconsistência e confere o código, o campo apontado (XML e TX2) e a correção.
 - **Mutação:** um erro conhecido é plantado por vez (conta de item, total, formato, chave, datas, tag faltando, grupo faltando). O teste exige que o validador ache o erro, aponte a linha do campo, sugira o valor original e que, aplicando a correção pelo mesmo código da tela, a nota fique limpa.
 - **Casos de borda:** lote `enviNFe`, `nfeProc` com assinatura e protocolo, XML assinado, prefixo de namespace, CDATA, ANSI/UTF-8/BOM, arquivos cortados e entradas inválidas, nota com 300 itens.
 - **Cenários de revisão** (`test/revisao.test.ts`): cada problema encontrado numa revisão independente vira um teste.

@@ -69,6 +69,32 @@ describe('leitura de TX2 igual ao componente de emissão', () => {
   });
 });
 
+describe('segundo lote de notas reais (devolução da reforma, % e cartão)', () => {
+  const dev = (extra: string) => TX2.replace('finNFe_B25=1', 'finNFe_B25=4').replace('tpNF_B11=1', 'tpNF_B11=0').replace(/CFOP_I08=5\d{3}/g, 'CFOP_I08=1202').replace('SALVARITEM', extra + 'SALVARITEM');
+  it('nItem_VC03 é o item da nota original (DFeReferenciado), não o número do item', async () => {
+    const a = await run(dev('chaveAcesso_VC02=43260912345678000195550010000009991123456780\nnItem_VC03=3\n').replace(/CFOP_I08=1202/g, 'CFOP_I08=2202'));
+    const x = a.generatedXml!.replace(/\s+/g, '');
+    expect(x).toContain('<detnItem="1">');
+    expect(x).toContain('<DFeReferenciado><chaveAcesso>43260912345678000195550010000009991123456780</chaveAcesso><nItem>3</nItem></DFeReferenciado>');
+    expect(a.findings.some((f) => f.code === '927' || /Campo repetido/.test(f.title))).toBe(false);
+    // NT 2025.002: a referência no item basta, sem NFref no cabeçalho
+    expect(a.findings.some((f) => f.code === '321')).toBe(false);
+  });
+  it('impostoDevol com a numeração antiga do componente (pDevol_U51, vIPIDevol_U61)', async () => {
+    const x = await xmlOf(dev('pDevol_U51=100.00\nvIPIDevol_U61=0.48\n'));
+    expect(x).toContain('<impostoDevol><pDevol>100.00</pDevol><IPI><vIPIDevol>0.48</vIPIDevol></IPI></impostoDevol>');
+  });
+  it('o componente tira o % dos valores (96%POLIAMIDA vira 96POLIAMIDA)', async () => {
+    const a = await run(TX2.replace('infCpl_Z03=Documento de exemplo, sem valor fiscal.', 'infCpl_Z03=Tecido 96%POLIAMIDA 04%ELASTANO'));
+    expect(a.generatedXml).toContain('<infCpl>Tecido 96POLIAMIDA 04ELASTANO</infCpl>');
+    expect(a.findings.find((f) => /^Caractere %/.test(f.title))?.sev).toBe('info');
+  });
+  it('arquivo vazio é apontado como vazio, não como XML malformado', async () => {
+    const a = await run('');
+    expect(a.findings[0].title).toBe('Arquivo vazio');
+  });
+});
+
 describe('ajustes por evidência das notas autorizadas', () => {
   it('cListServ com o código de tributação nacional (170101) sugere 17.01', async () => {
     const g = genNote(301, { items: 1 });

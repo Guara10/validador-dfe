@@ -257,7 +257,8 @@ export function genNote(seed: number, opt: GenOptions = {}): GenNote {
       (info as any).vIBSUF = vUF; (info as any).vCBS = vCBS;
     }
     const detM: MGroup = { '@nItem': String(i + 1), prod, imposto };
-    if (fin === '4' && r.chance(0.5)) {
+    // IPI devolvido vai só no impostoDevol: item com IPI tributado não leva os dois
+    if (fin === '4' && r.chance(0.5) && !(info.vIPI > 0)) {
       const vIPIDevol = r2(value * 0.05);
       detM.impostoDevol = { pDevol: '100.00', IPI: { vIPIDevol: f2(vIPIDevol) } };
       (info as any).vIPIDevol = vIPIDevol;

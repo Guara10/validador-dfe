@@ -24,6 +24,11 @@ const SEV_ORDER = { erro: 0, aviso: 1, info: 2 } as const;
 const sortFindings = (f: Finding[]) => f.sort((a, b) => SEV_ORDER[a.sev] - SEV_ORDER[b.sev] || (a.line ?? 1e9) - (b.line ?? 1e9));
 
 export async function analyze(text: string, eng: Engine): Promise<Analysis[]> {
+  if (text.replace(/^\uFEFF/, '').trim() === '') {
+    // visto em pastas de TX2 reais: arquivo gerado com 0 bytes
+    return [{ kind: 'xml', source: text, schemaOk: false, summary: {}, fatal: 'Arquivo vazio',
+      findings: [{ sev: 'erro', origin: 'estrutura', title: 'Arquivo vazio', message: 'O arquivo não tem conteúdo (0 bytes ou só espaços). Normalmente a geração foi interrompida.', fix: { text: 'Gere o arquivo de novo.' } }] }];
+  }
   if (looksLikeTx2(text)) return analyzeTx2(text, eng);
   return analyzeXml(text, eng);
 }

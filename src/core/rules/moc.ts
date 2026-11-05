@@ -251,6 +251,9 @@ export function runMocRules(nfe: XNode, ctx: RuleCtx): Finding[] {
     if (vD !== undefined && vP !== undefined && vD > vP + 0.001) add({ sev: 'erro', code: '483', title: `Desconto maior que o valor do produto (${lbl})`, message: `vDesc ${vD.toFixed(2)} é maior que vProd ${vP.toFixed(2)}.`, ...at(child(prod, 'vDesc')), found: child(prod, 'vDesc')!.text });
     // tributos devolvidos fora de devolução (UA01-10)
     if (child(d, 'impostoDevol') && fin !== '4') add({ sev: 'erro', code: '354', title: `Tributos devolvidos em nota que não é de devolução (${lbl})`, message: 'O grupo impostoDevol só pode ser usado com finNFe=4.', ...at(child(d, 'impostoDevol')), fix: { text: 'Remova o grupo impostoDevol ou corrija a finalidade.' } });
+    // IPI devolvido no grupo do IPI e no impostoDevol ao mesmo tempo: o total de IPI e o vNF não fecham juntos
+    const vIpiItem = num(select(d, 'imposto/IPI/IPITrib/vIPI')), vIpiDev = num(select(d, 'impostoDevol/IPI/vIPIDevol'));
+    if (fin === '4' && (vIpiItem ?? 0) > 0 && (vIpiDev ?? 0) > 0) add({ sev: 'aviso', title: `IPI devolvido informado duas vezes (${lbl})`, message: `O item tem vIPI ${vIpiItem!.toFixed(2)} no grupo IPI e vIPIDevol ${vIpiDev!.toFixed(2)} no impostoDevol. Na devolução o IPI devolvido vai só em vIPIDevol (que entra no total vIPIDevol); com os dois, ou o total vIPI não fecha com os itens (538) ou o IPI é somado duas vezes no vNF.`, ...at(select(d, 'imposto/IPI/IPITrib/vIPI')), found: select(d, 'imposto/IPI/IPITrib/vIPI')!.text, fix: { text: 'Confira com a tributação da devolução: normalmente o IPI devolvido fica só no vIPIDevol_U61 (impostoDevol).' } });
     // exportação (I50-10)
     if (select(prod, 'detExport') && idDest !== '3') add({ sev: 'erro', code: '336', title: `Grupo de exportação em operação que não é com o exterior (${lbl})`, message: 'detExport só pode ser informado com idDest=3.', ...at(select(prod, 'detExport')), fix: { text: 'Remova detExport ou corrija o idDest.' } });
 

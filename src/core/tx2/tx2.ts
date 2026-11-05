@@ -126,7 +126,7 @@ const GROUP: Record<string, string> = {
   H: 'det', I: 'det/prod', J: 'det/prod/veicProd', K: 'det/prod/med', L: 'det/prod', LA: 'det/prod/comb', LB: 'det/prod',
   M: 'det/imposto', N: 'det/imposto/ICMS', NA: 'det/imposto/ICMSUFDest', O: 'det/imposto/IPI', P: 'det/imposto/II',
   Q: 'det/imposto/PIS', R: 'det/imposto/PISST', S: 'det/imposto/COFINS', T: 'det/imposto/COFINSST', U: 'det/imposto/ISSQN',
-  UA: 'det/impostoDevol', UB: 'det/imposto', V: 'det', VA: 'det/obsItem', VB: 'det', VC: 'det',
+  UA: 'det/impostoDevol', UB: 'det/imposto', V: 'det', VA: 'det/obsItem', VB: 'det', VC: 'det/DFeReferenciado',
   W: 'total', X: 'transp', Y: 'cobr', YA: 'pag', YB: 'infIntermed', Z: 'infAdic', ZA: 'exporta', ZB: 'compra', ZC: 'cana', ZD: 'infRespTec',
 };
 const ITEM_LETTERS = /^(H|I|J|K|L|LA|LB|M|N|NA|O|P|Q|R|S|T|U|UA|UB|V|VA|VB|VC)$/;
@@ -156,8 +156,10 @@ export function buildFromTx2(note: Tx2Note, dict: Dict): BuildResult {
   const candidates = (f: Tx2Field): DNode[] => {
     const isItem = ITEM_LETTERS.test(f.letters);
     // autXML aparece com a numeração antiga do leiaute (G50-G52) em alguns geradores de TX2
-    const g = f.letters === 'G' && f.idNum >= 50 ? 'autXML' : GROUP[f.letters];
-    const pool = (f.tag === 'Id' || f.tag === 'versao' || f.tag === 'nItem') ? dict.byName.get('@' + f.tag) ?? [] : [...(dict.byName.get(f.tag) ?? []), ...(dict.byName.get('@' + f.tag) ?? [])];
+    // impostoDevol aparece com a numeração do MOC 6 (U50 a U61: pDevol_U51, vIPIDevol_U61); hoje é UA01 a UA04
+    const g = f.letters === 'G' && f.idNum >= 50 ? 'autXML' : f.letters === 'U' && f.idNum >= 50 ? 'det/impostoDevol' : GROUP[f.letters];
+    // nItem_VC03 é o item da nota referenciada (DFeReferenciado), não o atributo do det
+    const pool = (f.tag === 'Id' || f.tag === 'versao' || (f.tag === 'nItem' && f.letters !== 'VC')) ? dict.byName.get('@' + f.tag) ?? [] : [...(dict.byName.get(f.tag) ?? []), ...(dict.byName.get('@' + f.tag) ?? [])];
     let c = pool.filter((n) => n.path.startsWith(infPath + '/') || n.path.startsWith(infPath + '/@'));
     if (g !== undefined) {
       const pre = g ? `${infPath}/${g}/` : `${infPath}/`;
@@ -175,10 +177,17 @@ export function buildFromTx2(note: Tx2Note, dict: Dict): BuildResult {
   const scopes = new Map<string, Placed[]>();
   const empties: BuildResult['empties'] = [];
   const trimmed: Tx2Field[] = [];
+  const percents: Tx2Field[] = [];
+  const bandeiras: Tx2Field[] = [];
   for (const f0 of note.fields) {
     // o componente de emissão remove espaços no início e no fim dos valores (visto comparando TX2 com o XML autorizado)
-    const f = { ...f0, value: f0.value.trim() };
-    if (f.value !== f0.value && f.value !== '') trimmed.push(f0);
+    // ...e também tira o caractere % (ex.: "96%POLIAMIDA" sai "96POLIAMIDA" no XML autorizado)
+    const semPct = f0.value.replace(/%/g, '');
+    if (semPct !== f0.value) percents.push(f0);
+    const f = { ...f0, value: semPct.trim() };
+    // tBand_YA06 não chega ao XML autorizado (visto em 19 NFC-e com cartão): o componente descarta
+    if (f.tag === 'tBand' && f.letters === 'YA') { bandeiras.push(f0); continue; }
+    if (f.value !== semPct && f.value !== '') trimmed.push(f0);
     const isItem = ITEM_LETTERS.test(f.letters);
     if (isItem && f.item === undefined) {
       problems.push({ sev: 'erro', origin: 'estrutura', title: `Campo de item fora de INCLUIRITEM: ${f.field}`, message: 'Campos dos grupos de produto e impostos precisam estar entre INCLUIRITEM e SALVARITEM.', line: f.line, tx2Field: f.field, fix: { text: 'Mova a linha para dentro do bloco do item.' } });
@@ -232,6 +241,22 @@ export function buildFromTx2(note: Tx2Note, dict: Dict): BuildResult {
       title: `Espaço no início ou no fim de ${trimmed.length} campo${trimmed.length > 1 ? 's' : ''}`,
       message: `${trimmed.slice(0, 6).map((t) => t.field).join(', ')}${trimmed.length > 6 ? '...' : ''}. O componente de emissão remove esses espaços ao gerar o XML, então não causam rejeição; o validador também desconsidera.`,
       line: trimmed[0].line, tx2Field: trimmed[0].field,
+    });
+  }
+  if (bandeiras.length) {
+    problems.push({
+      sev: 'info', origin: 'estrutura',
+      title: 'Bandeira do cartão (tBand) não vai para o XML',
+      message: 'O componente de emissão não leva o tBand_YA06 para o XML (as notas autorizadas com cartão saem sem a tag). Como a tag é opcional, isso não causa rejeição; o validador também desconsidera.',
+      line: bandeiras[0].line, tx2Field: bandeiras[0].field,
+    });
+  }
+  if (percents.length) {
+    problems.push({
+      sev: 'info', origin: 'estrutura',
+      title: `Caractere % em ${percents.length} campo${percents.length > 1 ? 's' : ''}`,
+      message: `${percents.slice(0, 6).map((t) => t.field).join(', ')}${percents.length > 6 ? '...' : ''}. O componente de emissão remove o % ao gerar o XML (ex.: "96%POLIAMIDA" vira "96POLIAMIDA"), então não causa rejeição; o validador também desconsidera.`,
+      line: percents[0].line, tx2Field: percents[0].field,
     });
   }
   // empties: só para explicar; mesmo filtro de ramos não é necessário

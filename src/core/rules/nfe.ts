@@ -320,14 +320,37 @@ export function runNfeRules(nfe: XNode, ctx: RuleCtx): Finding[] {
   const refs = childrenNamed(ide, 'NFref');
   // B25-70: a regra não vale para devolução com CFOP 1.201, 1.202, 1.410, 1.411, 5.921 e 6.921 (NT 2013/005)
   const semRefOk = dets.length > 0 && dets.every((d) => ['1201', '1202', '1410', '1411', '5921', '6921'].includes(select(d, 'prod/CFOP')?.text ?? ''));
-  if (fin === '4' && !refs.length && !semRefOk) {
+  // NT 2025.002-RTC: a nota original pode ser referenciada no cabeçalho (NFref) ou no item (DFeReferenciado)
+  const dfeRefs = dets.map((d) => select(d, 'DFeReferenciado/chaveAcesso')).filter((n): n is XNode => !!n?.text);
+  if (fin === '4' && !refs.length && !dfeRefs.length && !semRefOk) {
     out.push({
       sev: 'erro', origin: 'regra', code: '321',
       title: 'Devolução sem documento referenciado',
-      message: 'A nota é de devolução (finNFe=4), mas não tem nenhum grupo NFref. A devolução precisa referenciar a nota original (refNFe), ou a nota de produtor (refNFP), modelo 1/1A (refNF) ou cupom (refECF).',
+      message: 'A nota é de devolução (finNFe=4), mas não referencia a nota original: não tem NFref no cabeçalho nem DFeReferenciado nos itens. A referência pode ir no cabeçalho (refNFe, refNFP, refNF, refECF) ou, pela NT 2025.002 (reforma tributária), em cada item (DFeReferenciado).',
       ...at(child(ide, 'finNFe')),
-      fix: { text: 'Inclua a chave da nota que está sendo devolvida (no TX2, refNFe_BA02=<chave de 44 dígitos>, logo depois do bloco da ide).' },
+      fix: { text: 'Inclua a chave da nota que está sendo devolvida: no cabeçalho (no TX2, refNFe_BA02=<chave>, logo depois do bloco da ide) ou no item (chaveAcesso_VC02=<chave> e nItem_VC03=<item da nota original>).' },
     });
+  }
+  if (fin === '4' && dfeRefs.length && refs.some((r) => child(r, 'refNFe'))) {
+    out.push({
+      sev: 'aviso', origin: 'regra',
+      title: 'Devolução referenciada no cabeçalho e no item ao mesmo tempo',
+      message: 'Pela NT 2025.002-RTC v1.53 a nota original vai no cabeçalho (refNFe) ou no item (DFeReferenciado), mas não nas duas formas. A regra entra em vigor em novembro de 2026 (homologação dia 09, produção dia 16).',
+      ...at(dfeRefs[0]),
+      fix: { text: 'Deixe a referência em um lugar só.' },
+    });
+  }
+  for (const k of dfeRefs) {
+    const key = k.text!.trim();
+    if (/^\d{44}$/.test(key) && String(dvChave(key.slice(0, 43))) !== key[43]) {
+      out.push({
+        sev: 'erro', origin: 'regra',
+        title: 'Chave referenciada no item com dígito verificador inválido',
+        message: `A chave ${key} (DFeReferenciado) não fecha no dígito verificador: o último dígito deveria ser ${dvChave(key.slice(0, 43))}. Provavelmente foi digitada ou copiada errada.`,
+        ...at(k), found: key,
+        fix: { text: 'Copie a chave de novo do XML ou do DANFE da nota original.' },
+      });
+    }
   }
   const ownKey = attr(inf, 'Id')?.replace(/^NFe/, '');
   for (const r of refs) {

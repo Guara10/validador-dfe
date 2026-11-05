@@ -2,6 +2,8 @@
 
 Valida **XML e TX2 de NF-e/NFC-e** direto no navegador e explica cada problema em português: em que linha está, qual valor foi encontrado, o que o leiaute espera e, quando dá para calcular, o valor corrigido.
 
+**Teste online:** [guara10.github.io/validador-dfe](https://guara10.github.io/validador-dfe/). Roda inteiro no navegador: os arquivos não são enviados para nenhum servidor.
+
 Nasceu do suporte técnico a um ERP fiscal: a SEFAZ devolve "225 – Falha no Schema XML" sem dizer onde, e o erro real costuma estar num campo vazio ou numa conta que não fecha dentro de um TX2 de centenas de linhas.
 
 ## O que ele confere
